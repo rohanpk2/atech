@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Atech · Custom BLE Firmware Deploy</title>
+  <style>
+    :root {font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#edf3fc;background:#080d17}
+    *{box-sizing:border-box} body{margin:0} .page{max-width:850px;margin:55px auto;padding:20px}
+    .eyebrow{color:#5b91ff;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:750}
+    h1{font-size:34px;margin:9px 0} p{color:#a6b3c9;line-height:1.55}
+    .panel{background:#111a2a;border:1px solid #293650;border-radius:17px;padding:25px;margin:22px 0}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px} label{display:block;color:#b9c5d9;font-size:13px;margin:0 0 10px}
+    input[type=file],select{width:100%;border:1px solid #31425f;background:#0b1321;color:#e7f0ff;padding:13px;border-radius:10px}
+    button{cursor:pointer;background:#2862e9;color:white;border:0;padding:12px 19px;border-radius:9px;font-size:14px;font-weight:680}
+    button.secondary{background:#243552} button:disabled{opacity:.4;cursor:not-allowed}
+    .actions{display:flex;flex-wrap:wrap;gap:11px;margin:18px 0}.value{font-size:14px;color:#d8e4f6;word-break:break-word;line-height:1.6}
+    .dim{color:#98a9c2;font-size:13px}.status{color:#87b4ff;font-weight:650}
+    .track{height:12px;background:#2a3750;overflow:hidden;border-radius:20px;margin:14px 0}
+    .bar{height:100%;width:0%;background:linear-gradient(90deg,#356bff,#46d9d0);transition:width .2s}
+    pre{background:#090f1a;border-radius:10px;white-space:pre-wrap;overflow:auto;padding:18px;max-height:220px;color:#abbed8;font-size:12px}
+    .fine{font-size:12px;color:#91a0b8}
+    @media(max-width:620px){.grid{grid-template-columns:1fr}.page{margin:16px auto}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="eyebrow">ATECH / INTERNAL ENGINEERING DEMO / #1</div>
+    <h1>Deploy firmware over Bluetooth</h1>
+    <p>Chrome on a Mac → Web Bluetooth GATT → ESP32-S3 OTA partition. <b>No Wi-Fi or cloud connection is needed to transmit the firmware.</b></p>
+    <section class="panel">
+      <div class="actions">
+        <button id="connect">1. Connect to board</button>
+        <button id="disconnect" class="secondary" disabled>Disconnect</button>
+      </div>
+      <div id="device" class="value">Device: not connected</div>
+      <div id="version" class="dim">Version: unknown</div>
+    </section>
+    <section class="panel">
+      <div class="grid">
+        <div><label for="bin">Compiled ESP32 firmware (.bin)</label><input type="file" accept=".bin" id="bin"/></div>
+        <div><label for="chunk">Chunk size (bytes, start at 120)</label>
+          <select id="chunk"><option value="120">120 — recommended for desktop Chrome</option><option value="60">60 — conservative</option><option value="20">20 — minimum ATT MTU fallback</option></select>
+        </div>
+      </div>
+      <div class="actions"><button id="deploy" disabled>2. Update firmware over BLE</button></div>
+      <div class="status" id="state">Connect a board and select a binary to begin.</div>
+      <div class="track"><div id="bar" class="bar"></div></div>
+      <div id="progress" class="dim">0% · 0 bytes transferred</div>
+    </section>
+    <section class="panel"><div class="eyebrow">Transfer log</div><pre id="log">Awaiting connection…</pre></section>
+    <p class="fine">Development prototype. CRC32 checks accidental corruption, not firmware authenticity. Do not put on production devices without authentication, signed updates and rollback tests. Do not unplug during installation.</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
