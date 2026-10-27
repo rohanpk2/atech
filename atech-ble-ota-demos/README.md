@@ -194,7 +194,7 @@ Use [BENCHMARKING.md](BENCHMARKING.md) for the repeatable procedure and `benchma
 | Dashboard integration complexity | | | |
 | Licensing / maintenance burden | Original Atech code | AGPL-3.0 | |
 
-**Selection rule:** prefer the approach that reliably recovers from failed updates and can be secured, not necessarily the one with the fastest green LED change. For Atech, evolve Demo 1 into an Atech-owned, versioned sector/window protocol and keep its Web Bluetooth client inside the dashboard. Borrow the useful behavior demonstrated by Demo 2—sector CRCs, bounded retries, larger write-without-response packets, and optional compression—but do not make the AGPL library or its externally hosted UI the product boundary unless that licensing/dependency choice is intentional. Espressif's vendor BLE OTA profile is the next baseline to test before finalizing the wire protocol.
+**Selection rule:** prefer the approach that reliably recovers from failed updates and can be secured, not necessarily the one with the fastest green LED change. For Atech, evolve Demo 1 into an Atech-owned, versioned sector/window protocol and keep its Web Bluetooth client inside the dashboard. Borrow the useful behavior demonstrated by Demo 2 (sector CRCs, bounded retries, larger write-without-response packets, and optional compression), but do not make the AGPL library or its externally hosted UI the product boundary unless that licensing/dependency choice is intentional. Espressif's vendor BLE OTA profile is the next baseline to test before finalizing the wire protocol.
 
 ## Reference implementations / API docs
 

@@ -95,7 +95,7 @@ Run these additional cases on macOS Chrome and iPhone Safari where applicable:
 | Return to BLE | After post-update verification, wait for the temporary Wi-Fi window to expire | BLE reconnects and reports the new version; Demo 1 commands/ACKs or Demo 2 gb88 service still work |
 | SoftAP start failure | Where safely reproducible, exhaust/disable the Wi-Fi resource or use a diagnostic build that forces AP-start failure | Serial/UI state reports failure, BLE remains usable, and no OTA session is left active |
 
-After every interrupted transfer, capture the serial log and verify which partition boots. For BLE, reconnect and read the version. For Wi-Fi, reopen the portal during its post-reboot window and read the version, then verify BLE again after timeout. A transfer is not a recovery success merely because the device resets—it must reconnect through the expected interface, report the expected old or new version, and retain both OTA methods.
+After every interrupted transfer, capture the serial log and verify which partition boots. For BLE, reconnect and read the version. For Wi-Fi, reopen the portal during its post-reboot window and read the version, then verify BLE again after timeout. A transfer is not a recovery success merely because the device resets. It must reconnect through the expected interface, report the expected old or new version, and retain both OTA methods.
 
 ## Functional verification after every success
 

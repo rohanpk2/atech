@@ -308,6 +308,7 @@ input:focus, select:focus { outline: none; border-color: var(--blue); box-shadow
   .command-entry { flex-direction: column; }
   .ota-controls { grid-template-columns: 1fr; }
   .file { grid-column: auto; }
+  .file-text small { display: none; }
   .log-row { grid-template-columns: 88px 1fr; }
   .log-message { grid-column: 1 / -1; }
 }

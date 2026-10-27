@@ -1,4 +1,4 @@
-// Atech Demo 2: gb88/BLEOTA — reference sector-based BLE OTA library.
+// Atech Demo 2: gb88/BLEOTA, the reference sector-based BLE OTA library.
 // Library license: AGPL-3.0; legal review REQUIRED before product use.
 #include <Arduino.h>
 #include <BLEDevice.h>
