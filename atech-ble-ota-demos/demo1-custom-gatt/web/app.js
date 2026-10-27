@@ -32,6 +32,8 @@ let challengeAttempts = 0;
 let challengeSuccesses = 0;
 let pendingOtaVerification = null;
 let selectedFileValid = false;
+const bluetoothAvailable = window.isSecureContext && Boolean(navigator.bluetooth);
+let selectedTransport = bluetoothAvailable ? 'ble' : 'wifi';
 const pendingCommands = new Map();
 
 function delay(milliseconds) {
@@ -70,27 +72,52 @@ function log(message, source = 'BROWSER', level = 'info') {
 }
 
 function setConnectionState(state, label) {
-  $('connectionPill').className = `connection-pill ${state}`;
-  $('connectionLabel').textContent = label;
-  $('globalConnection').className = `nav-status ${state}`;
+  $('globalConnection').className = `status ${state}`;
   $('globalConnectionText').textContent = label;
 }
 
 function setSignalState(state, label) {
-  $('signalState').className = `metric-value signal ${state}`;
+  $('signalState').className = `signal ${state}`;
   $('signalState').textContent = label;
 }
 
 function setOtaState(message, tone = 'neutral', badge = 'Ready') {
   $('otaState').textContent = message;
-  $('otaState').className = `notice ${tone}`;
+  $('otaState').className = `state ${tone}`;
   $('otaBadge').textContent = badge;
-  $('otaBadge').className = `mini-badge ${tone}`;
+  $('otaBadge').className = `badge ${tone}`;
+}
+
+function selectTransport(transport) {
+  if (transport === 'ble' && !bluetoothAvailable) return;
+  if (transferring) {
+    log('Finish or abort the active Bluetooth transfer before changing transports.', 'BROWSER', 'warn');
+    return;
+  }
+  if (transport === 'wifi' && isConnected()) {
+    $('compatibility').hidden = false;
+    $('compatibility').textContent = 'Disconnect the active Bluetooth session before starting the exclusive Wi-Fi OTA mode.';
+    $('disconnect').focus();
+    return;
+  }
+  selectedTransport = transport;
+  document.body.dataset.otaTransport = transport;
+
+  const usingBluetooth = transport === 'ble';
+  $('useBluetooth').classList.toggle('selected', usingBluetooth);
+  $('useBluetooth').setAttribute('aria-pressed', String(usingBluetooth));
+  $('useWifi').classList.toggle('selected', !usingBluetooth);
+  $('useWifi').setAttribute('aria-pressed', String(!usingBluetooth));
+  $('wifiTransportPanel').hidden = usingBluetooth;
+  $('bleConsole').hidden = !usingBluetooth;
+  refreshButtons();
 }
 
 function refreshButtons() {
   const connected = isConnected();
-  $('connect').disabled = transferring || connected;
+  $('useBluetooth').disabled = transferring || !bluetoothAvailable;
+  $('useWifi').disabled = transferring;
+  $('connect').disabled = transferring || connected || selectedTransport !== 'ble' || !bluetoothAvailable;
   $('disconnect').disabled = transferring || !connected;
   $('testConnection').disabled = transferring || !connected;
   $('sendCommand').disabled = transferring || !connected;
@@ -105,7 +132,7 @@ function refreshButtons() {
 
 function updateLastSeen() {
   $('lastSeen').textContent = timestamp();
-  setSignalState('live', 'Live · ESP32 ACK');
+  setSignalState('live', 'Live');
 }
 
 function clearGattHandles() {
@@ -141,7 +168,7 @@ function handleDisconnect(event) {
   stopHeartbeat();
   clearGattHandles();
   setConnectionState('offline', 'Disconnected');
-  setSignalState('offline', 'No live heartbeat');
+  setSignalState('offline', 'None');
   $('deviceName').textContent = device?.name || 'Previously selected device';
   log('GATT connection closed; live device acknowledgments stopped.', 'BROWSER',
       otaPhase === 'rebooting' || otaPhase === 'verifying' ? 'info' : 'warn');
@@ -229,8 +256,8 @@ async function connectGatt() {
   $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
   $('firmwareVersion').textContent = currentFirmwareInfo;
   setConnectionState('online', 'Connected');
-  setSignalState('waiting', 'Awaiting ESP32 ACK');
-  log(`GATT ready on ${device.name || 'ESP32-S3'} · ${currentFirmwareInfo}.`, 'BROWSER', 'success');
+  setSignalState('waiting', 'Waiting');
+  log(`GATT ready on ${device.name || 'ESP32-S3'}, ${currentFirmwareInfo}.`, 'BROWSER', 'success');
   refreshButtons();
   return currentFirmwareInfo;
 }
@@ -329,20 +356,20 @@ function startHeartbeat() {
 }
 
 function renderCommandResponse(response, success = true) {
-  $('commandResult').className = `ack-card ${success ? 'success' : 'error'}`;
-  $('commandResultTitle').textContent = success ? 'Command executed by ESP32' : 'Command rejected';
-  $('ackRequest').textContent = `#${response?.requestId ?? '—'}`;
+  $('commandResult').className = `result ${success ? 'success' : 'error'}`;
+  $('commandResultTitle').textContent = success ? 'Executed by ESP32' : 'Rejected';
+  $('ackRequest').textContent = response ? `#${response.requestId}` : 'None';
   $('ackStatus').textContent = response?.statusText || 'No valid acknowledgment';
   $('ackDevice').textContent = response?.ledModeText || 'Unknown';
   $('ackFirmware').textContent = response ? `v${response.firmwareVersion}` : 'Unknown';
-  $('ackLatency').textContent = response ? `${response.latencyMs.toFixed(1)} ms` : '—';
+  $('ackLatency').textContent = response ? `${response.latencyMs.toFixed(1)} ms` : 'None';
 }
 
 async function executeCommand(value) {
   const command = protocol.normalizeCommand(value);
   $('commandInput').value = command;
-  $('commandResult').className = 'ack-card pending';
-  $('commandResultTitle').textContent = 'Waiting for an actual ESP32 acknowledgment…';
+  $('commandResult').className = 'result pending';
+  $('commandResultTitle').textContent = 'Waiting for ESP32 acknowledgment';
   try {
     const response = await sendDeviceCommand(protocol.COMMANDS[command]);
     renderCommandResponse(response, true);
@@ -358,20 +385,20 @@ async function runChallengeTest() {
   const nonce = randomNonce();
   const challenge = protocol.bytesToHex(nonce);
   $('challengeValue').textContent = challenge;
-  $('testResult').textContent = 'Waiting for exact echo…';
+  $('testResult').textContent = 'Waiting for exact echo';
   $('testResult').className = 'test-result waiting';
-  $('testLatency').textContent = '—';
+  $('testLatency').textContent = 'Pending';
   log(`Challenge ${challenge} sent; browser write alone does not count as success.`, 'BROWSER TX');
   try {
     const response = await sendDeviceCommand(protocol.COMMANDS.ping, {nonce, timeout: 5000, quiet: true});
     challengeSuccesses += 1;
-    $('testResult').textContent = 'Verified PONG from ESP32';
+    $('testResult').textContent = 'Verified echo from ESP32';
     $('testResult').className = 'test-result success';
     $('testLatency').textContent = `${response.latencyMs.toFixed(1)} ms`;
     $('testCount').textContent = `${challengeSuccesses} / ${challengeAttempts}`;
     log(`Challenge echoed exactly by firmware v${response.firmwareVersion}.`, 'ESP32 ACK', 'success');
   } catch (error) {
-    $('testResult').textContent = 'Connection test failed';
+    $('testResult').textContent = 'Failed';
     $('testResult').className = 'test-result error';
     $('testCount').textContent = `${challengeSuccesses} / ${challengeAttempts}`;
     log(error.message, 'BROWSER', 'error');
@@ -445,9 +472,9 @@ async function finishOtaVerification() {
   const previousVersion = pendingOtaVerification.previousVersion;
   pendingOtaVerification = null;
   otaPhase = 'verified';
-  setOtaState(`Update verified on the physical ESP32: ${previousVersion} → ${currentFirmwareInfo}. PING acknowledged after reboot.`,
+  setOtaState(`Update verified on the ESP32: ${previousVersion} is now ${currentFirmwareInfo}. PING acknowledged after reboot.`,
               'success', 'Verified');
-  log(`Post-reboot verification passed · ${currentFirmwareInfo} · PING ${pong.latencyMs.toFixed(1)} ms.`,
+  log(`Post-reboot verification passed, ${currentFirmwareInfo}, PING ${pong.latencyMs.toFixed(1)} ms.`,
       'ESP32 ACK', 'success');
 }
 
@@ -493,7 +520,7 @@ async function deploy() {
   stopHeartbeat();
   refreshButtons();
   updateProgress(0, bytes.length, startedAt);
-  log(`${file.name} validated · ${formatBytes(bytes.length)} · CRC32 0x${hash.toString(16).padStart(8, '0')}.`,
+  log(`${file.name} validated, ${formatBytes(bytes.length)}, CRC32 0x${hash.toString(16).padStart(8, '0')}.`,
       'BROWSER', 'success');
 
   try {
@@ -532,7 +559,7 @@ async function deploy() {
         'ESP32 ACK', 'success');
     pendingOtaVerification = {deviceId: selectedDeviceId, previousVersion, fileName: file.name};
     otaPhase = 'rebooting';
-    setOtaState('Image transferred and CRC-validated. Waiting for the ESP32 to reboot—update is not yet verified.',
+    setOtaState('Image transferred and CRC-validated. Waiting for the ESP32 to reboot. The update is not yet verified.',
                 'working', 'Rebooting');
     await reconnectAndVerifyOta();
   } catch (error) {
@@ -564,7 +591,7 @@ async function validateSelectedFile() {
     return;
   }
   $('fileName').textContent = file.name;
-  $('fileMeta').textContent = `${formatBytes(file.size)} · validating image header…`;
+  $('fileMeta').textContent = `${formatBytes(file.size)}, validating image header`;
   try {
     if (!file.name.toLowerCase().endsWith('.bin')) throw new Error('Choose a compiled firmware.bin file');
     if (file.size < 1024) throw new Error('File is too small to be an ESP32 application image');
@@ -572,7 +599,7 @@ async function validateSelectedFile() {
     const header = new Uint8Array(await file.slice(0, 64).arrayBuffer());
     protocol.validateEsp32S3Application(header);
     selectedFileValid = true;
-    $('fileMeta').textContent = `${formatBytes(file.size)} · ESP32-S3 application image`;
+    $('fileMeta').textContent = `${formatBytes(file.size)}, ESP32-S3 application image`;
     setOtaState('Firmware file looks valid. Connect a board and deploy when ready.', 'neutral', 'Ready');
   } catch (error) {
     $('fileMeta').textContent = error.message;
@@ -627,15 +654,19 @@ $('clearLog').addEventListener('click', () => {
   log('Activity log cleared.');
 });
 
-if (!window.isSecureContext || !navigator.bluetooth) {
+$('useBluetooth').addEventListener('click', () => selectTransport('ble'));
+$('useWifi').addEventListener('click', () => selectTransport('wifi'));
+
+if (!bluetoothAvailable) {
   $('compatibility').hidden = false;
   $('compatibility').textContent = !window.isSecureContext
-    ? 'Web Bluetooth requires HTTPS or http://localhost.'
-    : 'This browser does not expose Web Bluetooth. Use desktop Chrome.';
+    ? 'Web Bluetooth requires HTTPS or http://localhost. Wi-Fi fallback is selected and does not require Web Bluetooth.'
+    : 'This browser does not expose Web Bluetooth. Wi-Fi fallback is selected for Safari and other unsupported browsers.';
+  $('useBluetooth').disabled = true;
 }
 
 setConnectionState('offline', 'Disconnected');
-setSignalState('offline', 'No live heartbeat');
+setSignalState('offline', 'None');
 setOtaState('Connect an ESP32-S3 and select a compiled firmware.bin.', 'neutral', 'Ready');
-refreshButtons();
+selectTransport(selectedTransport);
 log('Dashboard ready. No device action is considered successful without an ESP32 acknowledgment.');

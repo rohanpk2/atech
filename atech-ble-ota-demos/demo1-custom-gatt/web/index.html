@@ -3,234 +3,142 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#07111f">
-  <title>Atech Device Console · BLE OTA</title>
+  <meta name="theme-color" content="#ffffff">
+  <title>Atech Device Console</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="ambient ambient-one"></div>
-  <div class="ambient ambient-two"></div>
-
-  <nav class="topbar" aria-label="Atech navigation">
-    <div class="brand">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div>
-        <div class="brand-name">ATECH</div>
-        <div class="brand-subtitle">Device Operations</div>
+  <header class="topbar">
+    <div class="brand">Atech <span>Device console</span></div>
+    <div class="topbar-actions">
+      <div id="globalConnection" class="status offline">
+        <i aria-hidden="true"></i>
+        <span id="globalConnectionText">Disconnected</span>
       </div>
+      <button id="connect" class="btn primary" type="button">Connect</button>
+      <button id="disconnect" class="btn secondary" type="button" disabled>Disconnect</button>
     </div>
-    <div id="globalConnection" class="nav-status offline">
-      <span class="status-dot"></span>
-      <span id="globalConnectionText">Disconnected</span>
+  </header>
+
+  <main class="page">
+    <div id="compatibility" class="banner" role="alert" hidden></div>
+
+    <div class="segmented" role="group" aria-label="Update method">
+      <button id="useBluetooth" type="button" aria-pressed="false">Bluetooth</button>
+      <button id="useWifi" type="button" aria-pressed="false">Wi-Fi</button>
     </div>
-  </nav>
 
-  <main class="shell">
-    <header class="hero">
-      <div>
-        <div class="kicker"><span>LAB CONSOLE</span><i></i><span>BLE / LOCAL ONLY</span></div>
-        <h1>Control, prove, and update<br><em>your ESP32-S3.</em></h1>
-        <p>Every green result below comes from a response sent by the physical board. No Wi-Fi, cloud relay, or simulated firmware upload.</p>
+    <section id="wifiTransportPanel" class="card" aria-labelledby="wifi-heading" hidden>
+      <div class="card-head">
+        <h2 id="wifi-heading">Update over Wi-Fi</h2>
+        <a class="btn primary" href="http://192.168.4.1" target="_blank" rel="noreferrer">Open 192.168.4.1</a>
       </div>
-      <div class="hero-actions">
-        <button id="connect" class="button primary">
-          <span class="button-icon" aria-hidden="true">⌁</span>
-          Connect device
-        </button>
-        <button id="disconnect" class="button ghost" disabled>Disconnect</button>
-      </div>
-    </header>
-
-    <div id="compatibility" class="compatibility" role="alert" hidden></div>
-
-    <section class="device-strip" aria-labelledby="device-heading">
-      <div class="device-identity">
-        <div class="device-icon" aria-hidden="true">
-          <span class="chip-core">S3</span>
-          <i class="pin pin-one"></i><i class="pin pin-two"></i><i class="pin pin-three"></i>
-        </div>
-        <div>
-          <div class="section-label" id="device-heading">Selected device</div>
-          <div id="deviceName" class="device-name">No ESP32-S3 connected</div>
-        </div>
-      </div>
-      <div class="device-metrics">
-        <div class="metric">
-          <span>Connection</span>
-          <div id="connectionPill" class="connection-pill offline">
-            <i></i><strong id="connectionLabel">Disconnected</strong>
-          </div>
-        </div>
-        <div class="metric">
-          <span>Firmware</span>
-          <strong id="firmwareVersion" class="metric-value mono">Unknown</strong>
-        </div>
-        <div class="metric">
-          <span>Last board ACK</span>
-          <strong id="lastSeen" class="metric-value">Never</strong>
-        </div>
-        <div class="metric">
-          <span>Radio proof</span>
-          <strong id="signalState" class="metric-value signal offline">No live heartbeat</strong>
-        </div>
-      </div>
+      <p class="note">This dashboard does not fetch or upload to the device. Disconnect any active Bluetooth session, join the board's hotspot, and finish the upload on its local page.</p>
+      <ol class="steps">
+        <li>With the firmware running, hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it. Do not press RST.</li>
+        <li>Join <code>Atech-OTA-D1-&lt;suffix&gt;</code> in Wi-Fi settings. The suffix, WPA2 password, and portal token come from the 115200-baud serial output or the deployment record. Stay connected if the phone warns that the network has no Internet.</li>
+        <li>Open <code>http://192.168.4.1</code> in Safari or Chrome and enter the portal token.</li>
+        <li>Select the application <code>firmware.bin</code>, not a bootloader, partitions, or merged image, then tap Deploy Firmware.</li>
+        <li>Wait for verified success and reboot. Rejoin the hotspot if prompted to see the new version. Wi-Fi mode times out and Bluetooth resumes.</li>
+      </ol>
     </section>
 
-    <div class="dashboard-grid">
-      <section class="panel command-panel" aria-labelledby="command-heading">
-        <div class="panel-heading">
-          <div>
-            <div class="section-label">01 · DEVICE COMMANDS</div>
-            <h2 id="command-heading">Tell the board what to do</h2>
-          </div>
-          <span class="protocol-badge">ACK required</span>
-        </div>
-        <p class="panel-copy">Only five safe commands are accepted. The dashboard waits for a matching request ID from the ESP32 before reporting execution.</p>
-
-        <label class="field-label" for="commandInput">Command</label>
-        <div class="command-entry">
-          <input id="commandInput" type="text" list="commandList" value="blink green"
-                 autocomplete="off" spellcheck="false" disabled
-                 aria-describedby="commandHelp">
-          <datalist id="commandList">
-            <option value="blink blue"></option>
-            <option value="blink green"></option>
-            <option value="stop blinking"></option>
-            <option value="get status"></option>
-            <option value="ping"></option>
-          </datalist>
-          <button id="sendCommand" class="button primary" disabled>Send command <span>→</span></button>
-        </div>
-        <div id="commandHelp" class="helper">Try a command or use a preset:</div>
-        <div class="command-presets">
-          <button class="preset blue" data-command="blink blue" disabled><i></i>Blink blue</button>
-          <button class="preset green" data-command="blink green" disabled><i></i>Blink green</button>
-          <button class="preset" data-command="stop blinking" disabled>Stop</button>
-          <button class="preset" data-command="get status" disabled>Get status</button>
-        </div>
-
-        <div id="commandResult" class="ack-card idle" aria-live="polite">
-          <div class="ack-title-row">
-            <span class="ack-symbol" aria-hidden="true">✓</span>
-            <strong id="commandResultTitle">No device command sent yet</strong>
-          </div>
-          <div class="ack-grid">
-            <div><span>Request</span><strong id="ackRequest">—</strong></div>
-            <div><span>ESP32 status</span><strong id="ackStatus">Awaiting command</strong></div>
-            <div><span>Device state</span><strong id="ackDevice">Unknown</strong></div>
-            <div><span>Firmware</span><strong id="ackFirmware">Unknown</strong></div>
-            <div><span>Round trip</span><strong id="ackLatency">—</strong></div>
-          </div>
-        </div>
+    <div id="bleConsole">
+      <section class="card device" aria-labelledby="deviceName">
+        <h2 id="deviceName">No device connected</h2>
+        <dl class="stats">
+          <div><dt>Firmware</dt><dd id="firmwareVersion" class="mono">Unknown</dd></div>
+          <div><dt>Last acknowledgment</dt><dd id="lastSeen">Never</dd></div>
+          <div><dt>Heartbeat</dt><dd id="signalState" class="signal offline">None</dd></div>
+        </dl>
       </section>
 
-      <section class="panel test-panel" aria-labelledby="test-heading">
-        <div class="panel-heading compact">
-          <div>
-            <div class="section-label">02 · CONNECTION PROOF</div>
-            <h2 id="test-heading">Prove it went over the air</h2>
+      <div class="grid">
+        <section class="card" aria-labelledby="command-heading">
+          <div class="card-head"><h2 id="command-heading">Commands</h2></div>
+          <div class="command-entry">
+            <input id="commandInput" type="text" list="commandList" value="blink green"
+                   aria-label="Command" autocomplete="off" spellcheck="false" disabled>
+            <datalist id="commandList">
+              <option value="blink blue"></option>
+              <option value="blink green"></option>
+              <option value="stop blinking"></option>
+              <option value="get status"></option>
+              <option value="ping"></option>
+            </datalist>
+            <button id="sendCommand" class="btn primary" type="button" disabled>Send</button>
           </div>
-          <div class="radio-glyph" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
-        </div>
-        <p class="panel-copy">A random 64-bit challenge is sent over BLE. The firmware must echo the exact bytes before the test passes.</p>
+          <div class="presets">
+            <button class="chip" type="button" data-command="blink blue" disabled>Blink blue</button>
+            <button class="chip" type="button" data-command="blink green" disabled>Blink green</button>
+            <button class="chip" type="button" data-command="stop blinking" disabled>Stop</button>
+            <button class="chip" type="button" data-command="get status" disabled>Get status</button>
+          </div>
+          <div id="commandResult" class="result idle" aria-live="polite">
+            <strong id="commandResultTitle">No command sent</strong>
+            <dl class="kv">
+              <div><dt>Request</dt><dd id="ackRequest">None</dd></div>
+              <div><dt>Status</dt><dd id="ackStatus">Idle</dd></div>
+              <div><dt>LED</dt><dd id="ackDevice">Unknown</dd></div>
+              <div><dt>Firmware</dt><dd id="ackFirmware">Unknown</dd></div>
+              <div><dt>Round trip</dt><dd id="ackLatency">None</dd></div>
+            </dl>
+          </div>
+        </section>
 
-        <div class="challenge-box">
-          <span>Latest challenge</span>
-          <strong id="challengeValue" class="mono">Not sent</strong>
-        </div>
-        <button id="testConnection" class="button outline full" disabled>Run BLE connection test</button>
+        <section class="card" aria-labelledby="test-heading">
+          <div class="card-head"><h2 id="test-heading">Connection test</h2></div>
+          <dl class="kv stack" aria-live="polite">
+            <div><dt>Challenge</dt><dd id="challengeValue" class="mono">Not sent</dd></div>
+            <div><dt>Result</dt><dd id="testResult" class="test-result neutral">Not run</dd></div>
+            <div><dt>Latency</dt><dd id="testLatency">None</dd></div>
+            <div><dt>Passed</dt><dd id="testCount">0 / 0</dd></div>
+          </dl>
+          <button id="testConnection" class="btn primary full" type="button" disabled>Run connection test</button>
+        </section>
 
-        <div class="test-summary" aria-live="polite">
-          <div>
-            <span>Result</span>
-            <strong id="testResult" class="test-result neutral">Waiting for test</strong>
+        <section class="card span" aria-labelledby="ota-heading">
+          <div class="card-head">
+            <h2 id="ota-heading">Firmware update</h2>
+            <span id="otaBadge" class="badge neutral">Ready</span>
           </div>
-          <div>
-            <span>Latency</span>
-            <strong id="testLatency">—</strong>
-          </div>
-          <div>
-            <span>Passed</span>
-            <strong id="testCount">0 / 0</strong>
-          </div>
-        </div>
-        <div class="proof-note">
-          <span aria-hidden="true">⚡</span>
-          For the strongest proof, power the board from a wall adapter or power bank—not the Mac.
-        </div>
-      </section>
-
-      <section class="panel ota-panel" aria-labelledby="ota-heading">
-        <div class="panel-heading">
-          <div>
-            <div class="section-label">03 · FIRMWARE DEPLOYMENT</div>
-            <h2 id="ota-heading">Update over Bluetooth</h2>
-          </div>
-          <span id="otaBadge" class="mini-badge neutral">Ready</span>
-        </div>
-        <p class="panel-copy">The application image is written into the inactive OTA partition. Success requires CRC validation, reboot, a changed version, and a post-boot PING.</p>
-
-        <div class="ota-controls">
-          <label class="file-drop" for="bin">
-            <input type="file" accept=".bin,application/octet-stream" id="bin">
-            <span class="file-icon" aria-hidden="true">⇧</span>
-            <span>
-              <strong id="fileName">Choose firmware.bin</strong>
-              <small id="fileMeta">ESP32-S3 application image · up to 6 MiB</small>
-            </span>
-            <b>Browse</b>
-          </label>
-          <label class="chunk-field" for="chunk">
-            <span>BLE payload</span>
-            <select id="chunk">
-              <option value="120">120 bytes · desktop</option>
-              <option value="60">60 bytes · conservative</option>
-              <option value="20">20 bytes · minimum MTU</option>
+          <div class="ota-controls">
+            <label class="file" for="bin">
+              <input type="file" accept=".bin,application/octet-stream" id="bin">
+              <span class="file-text">
+                <strong id="fileName">Choose firmware.bin</strong>
+                <small id="fileMeta">ESP32-S3 application image, up to 6 MiB</small>
+              </span>
+              <span class="file-cta">Browse</span>
+            </label>
+            <select id="chunk" aria-label="Bluetooth payload size">
+              <option value="120">120-byte payload</option>
+              <option value="60">60-byte payload</option>
+              <option value="20">20-byte payload</option>
             </select>
-          </label>
-          <button id="deploy" class="button deploy" disabled>
-            <span>Deploy firmware</span><i aria-hidden="true">→</i>
-          </button>
-        </div>
-
-        <div id="otaState" class="notice neutral" aria-live="polite">Connect an ESP32-S3 and select a compiled firmware.bin.</div>
-        <div class="progress-track" role="progressbar" aria-label="Firmware upload progress"
-             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <div id="bar" class="progress-bar"></div>
-        </div>
-        <div class="progress-stats">
-          <strong id="progressPercent">0%</strong>
-          <span id="progressBytes">0 B transferred</span>
-          <span id="progressSpeed">0.0 KiB/s</span>
-        </div>
-        <div class="ota-steps" aria-label="OTA verification stages">
-          <span><b>1</b> Transfer</span><i></i>
-          <span><b>2</b> CRC validate</span><i></i>
-          <span><b>3</b> Reboot</span><i></i>
-          <span><b>4</b> Version + PING</span>
-        </div>
-      </section>
-
-      <section class="panel log-panel" aria-labelledby="log-heading">
-        <div class="panel-heading compact">
-          <div>
-            <div class="section-label">04 · ACTIVITY LOG</div>
-            <h2 id="log-heading">Browser ↔ ESP32</h2>
+            <button id="deploy" class="btn primary" type="button" disabled>Deploy</button>
           </div>
-          <button id="clearLog" class="text-button">Clear log</button>
-        </div>
-        <div class="log-key">
-          <span><i class="browser"></i>Browser-side event</span>
-          <span><i class="device"></i>Actual ESP32 response</span>
-        </div>
-        <div id="log" class="activity-log" role="log" aria-live="polite"></div>
-      </section>
-    </div>
+          <p id="otaState" class="state neutral" aria-live="polite">Connect an ESP32-S3 and select a compiled firmware.bin.</p>
+          <div class="progress" role="progressbar" aria-label="Firmware upload progress"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="bar"></div>
+          </div>
+          <div class="progress-meta">
+            <strong id="progressPercent">0%</strong>
+            <span id="progressBytes">0 B transferred</span>
+            <span id="progressSpeed">0.0 KiB/s</span>
+          </div>
+        </section>
 
-    <footer>
-      <span>ATECH BLE OTA · ENGINEERING PROTOTYPE</span>
-      <span>CRC protects transport integrity—not firmware authenticity. Production requires signed images, authorization, and rollback.</span>
-    </footer>
+        <section class="card span" aria-labelledby="log-heading">
+          <div class="card-head">
+            <h2 id="log-heading">Activity</h2>
+            <button id="clearLog" class="btn text" type="button">Clear</button>
+          </div>
+          <div id="log" class="log" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </div>
   </main>
 
   <script src="protocol.js"></script>

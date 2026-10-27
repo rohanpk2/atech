@@ -3,6 +3,7 @@
 // Production devices require authenticated access and signed firmware.
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
+#include <AtechWifiOta.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -17,7 +18,17 @@
 #define DEMO_VERSION 1
 #endif
 
+// Leave these empty to generate and persist device-specific credentials in
+// NVS. Provisioned builds can override either value with quoted build flags.
+#ifndef ATECH_WIFI_AP_PASSWORD
+#define ATECH_WIFI_AP_PASSWORD ""
+#endif
+#ifndef ATECH_WIFI_OTA_TOKEN
+#define ATECH_WIFI_OTA_TOKEN ""
+#endif
+
 #define LED_PIN 48 // Change to 38 if your board's RGB LED uses GPIO38.
+#define WIFI_OTA_BUTTON_PIN 0 // ESP32-S3 DevKitC BOOT; sampled only after boot.
 #define SERVICE_UUID  "a7ec0001-2e47-4dd2-82a4-9c2cf6eaa001"
 #define CONTROL_UUID  "a7ec0002-2e47-4dd2-82a4-9c2cf6eaa001"
 #define DATA_UUID     "a7ec0003-2e47-4dd2-82a4-9c2cf6eaa001"
@@ -28,8 +39,17 @@
 
 constexpr uint16_t ESP32_S3_CHIP_ID = 9;
 constexpr uint32_t OTA_IDLE_TIMEOUT_MS = 30000;
+constexpr uint32_t WIFI_OTA_INACTIVITY_TIMEOUT_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t WIFI_OTA_BUTTON_HOLD_MS = 3000;
 constexpr uint8_t COMMAND_PROTOCOL_VERSION = 1;
 constexpr size_t COMMAND_PACKET_SIZE = 20;
+constexpr char WIFI_OTA_IMAGE_IDENTITY[] = "ATECH-OTA-APP-DEMO1";
+
+#if DEMO_VERSION == 1
+constexpr char FIRMWARE_INFO[] = "Atech demo1 / v1 / blue default";
+#else
+constexpr char FIRMWARE_INFO[] = "Atech demo1 / v2 / green default";
+#endif
 
 enum class FrameKind : uint8_t { OtaControl, OtaData, Command };
 enum class LedMode : uint8_t { Off = 0, BlinkBlue = 1, BlinkGreen = 2 };
@@ -62,6 +82,8 @@ BLEServer *bleServer = nullptr;
 volatile bool deviceConnected = false;
 volatile bool disconnectPending = false;
 bool previouslyConnected = false;
+AtechWifiOtaPortal wifiOta;
+bool wifiOtaModeActive = false;
 
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 #if DEMO_VERSION == 1
@@ -76,6 +98,29 @@ uint32_t expectedCRC = 0;
 uint32_t runningCRC = 0xFFFFFFFFUL;
 uint32_t received = 0;
 uint32_t lastActivityMs = 0;
+
+bool bleBlocksWifiOta() {
+  // Entering Wi-Fi mode never evicts a connected BLE client and never aborts
+  // a BLE update. Release the button, disconnect, then hold it again.
+  return updating || deviceConnected;
+}
+
+bool otaTransportBusy() {
+  return updating || wifiOtaModeActive;
+}
+
+void handleWifiOtaModeChanged(bool active) {
+  wifiOtaModeActive = active;
+  if (!bleServer) return;
+  if (active) {
+    BLEDevice::stopAdvertising();
+    if (incoming) xQueueReset(incoming);
+    Serial.println("BLE advertising paused for exclusive Wi-Fi OTA mode");
+  } else if (!deviceConnected && !updating) {
+    bleServer->startAdvertising();
+    Serial.println("BLE advertising resumed after Wi-Fi OTA mode");
+  }
+}
 
 uint16_t le16(const uint8_t *bytes) {
   return uint16_t(bytes[0]) | (uint16_t(bytes[1]) << 8);
@@ -143,7 +188,7 @@ void notifyCommandResponse(uint32_t requestId, uint8_t opcode,
   response[7] = static_cast<uint8_t>(ledMode);
   memcpy(&response[8], nonce, 8);
   response[16] = DEMO_VERSION;
-  response[17] = updating ? 0x01 : 0x00;
+  response[17] = otaTransportBusy() ? 0x01 : 0x00;
   putLe16(&response[18], crc16(response, 18));
   responseCharacteristic->setValue(response, sizeof(response));
   responseCharacteristic->notify();
@@ -195,7 +240,7 @@ void abortUpdate(uint8_t code = 0xE0, bool sendStatus = true) {
 void handleControl(const Frame &frame) {
   const uint8_t opcode = frame.bytes[0];
   if (opcode == 0x01 && frame.length == 9) { // START: opcode + size + CRC32
-    if (updating) { notifyStatus(0xE1, received); return; }
+    if (otaTransportBusy()) { notifyStatus(0xE1, received); return; }
     expectedSize = le32(&frame.bytes[1]);
     expectedCRC = le32(&frame.bytes[5]);
     received = 0;
@@ -274,7 +319,7 @@ void handleCommand(const Frame &frame) {
     notifyCommandResponse(requestId, opcode, CommandStatus::CrcError, nonce);
     return;
   }
-  if (updating) {
+  if (otaTransportBusy()) {
     notifyCommandResponse(requestId, opcode, CommandStatus::Busy, nonce);
     return;
   }
@@ -346,11 +391,7 @@ void setup() {
 
   BLECharacteristic *info = service->createCharacteristic(
       INFO_UUID, BLECharacteristic::PROPERTY_READ);
-#if DEMO_VERSION == 1
-  info->setValue("Atech demo1 / v1 / blue default");
-#else
-  info->setValue("Atech demo1 / v2 / green default");
-#endif
+  info->setValue(FIRMWARE_INFO);
 
   BLECharacteristic *command = service->createCharacteristic(
       COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE);
@@ -368,11 +409,33 @@ void setup() {
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
   advertising->setScanResponse(true);
-  BLEDevice::startAdvertising();
+
+  AtechWifiOtaConfig wifiOtaConfig = {};
+  wifiOtaConfig.deviceName = "Atech-Custom-OTA";
+  wifiOtaConfig.firmwareVersion = FIRMWARE_INFO;
+  wifiOtaConfig.ssidPrefix = "Atech-OTA-D1";
+  wifiOtaConfig.imageIdentity = WIFI_OTA_IMAGE_IDENTITY;
+  wifiOtaConfig.preferencesNamespace = "atech_ota_d1";
+  wifiOtaConfig.apPasswordOverride = ATECH_WIFI_AP_PASSWORD;
+  wifiOtaConfig.otaTokenOverride = ATECH_WIFI_OTA_TOKEN;
+  wifiOtaConfig.buttonPin = WIFI_OTA_BUTTON_PIN;
+  wifiOtaConfig.buttonActiveLow = true;
+  wifiOtaConfig.buttonHoldMs = WIFI_OTA_BUTTON_HOLD_MS;
+  wifiOtaConfig.inactivityTimeoutMs = WIFI_OTA_INACTIVITY_TIMEOUT_MS;
+  wifiOtaConfig.rebootDelayMs = 2200;
+  wifiOtaConfig.otherOtaBusy = bleBlocksWifiOta;
+  wifiOtaConfig.modeChanged = handleWifiOtaModeChanged;
+  if (!wifiOta.begin(wifiOtaConfig)) {
+    Serial.printf("Wi-Fi OTA initialization failed: %s\n",
+                  wifiOta.lastError().c_str());
+  }
+  if (!wifiOta.isActive()) BLEDevice::startAdvertising();
   Serial.printf("Atech BLE command + OTA firmware v%d ready\n", DEMO_VERSION);
 }
 
 void loop() {
+  wifiOta.loop();
+
   if (disconnectPending) {
     disconnectPending = false;
     if (updating) {
@@ -397,7 +460,7 @@ void loop() {
     Serial.printf("OTA timed out at %lu bytes\n", (unsigned long)received);
     abortUpdate(0xEA);
   }
-  if (!deviceConnected && previouslyConnected) {
+  if (!wifiOtaModeActive && !deviceConnected && previouslyConnected) {
     delay(250);
     bleServer->startAdvertising();
   }

@@ -1,8 +1,8 @@
-# Atech ESP32-S3: browser-to-board BLE OTA evaluation
+# Atech ESP32-S3: Bluetooth OTA with Wi-Fi browser fallback
 
-**Status:** Demo 1's command dashboard and both firmware variants build and pass their offline protocol checks; Demo 2 remains available for comparison. **Neither end-to-end BLE path has been verified on a physical ESP32-S3 in this environment.** Transfer reliability must be measured on the real board.
+**Status:** both demos provide their original Bluetooth OTA path plus an independent, device-hosted Wi-Fi SoftAP portal in the `base` and `updated` images. **No BLE or Wi-Fi transfer has been verified on physical ESP32-S3 hardware in this environment.** Successful compilation and browser unit tests are not hardware results; use [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) for the required matrix.
 
-**User experience:** Operator opens a **web dashboard on Mac Chrome**, connects directly to the nearby ESP32-S3 over Bluetooth LE, chooses a *compiled* `firmware.bin`, clicks deploy, sees progress, watches the board reboot, and verifies a different LED behavior/version. **The firmware bytes themselves travel over BLE.** There is no requirement for the board to have Wi-Fi.
+**User experience:** use Bluetooth OTA from the existing Chrome interfaces when Web Bluetooth is available. As a fallback, hold the running board's **BOOT** button for about three seconds, join its WPA2 `Atech-OTA-D1-<suffix>` or `Atech-OTA-D2-<suffix>` hotspot, and upload the application `firmware.bin` from Safari or Chrome at **http://192.168.4.1/**. Both transports stream into the inactive OTA application partition, reboot, and retain both update methods.
 
 ## Shortlist (BLE binary transport, web-first)
 
@@ -20,16 +20,19 @@ These are implementation families rather than five mutually exclusive radio tech
 
 - `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It provides safe LED/status commands, matched ESP32 acknowledgments, random-nonce connection proofs, and a real OTA path. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write.
 - `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag; use its maintained Web Bluetooth dashboard at https://gb88.github.io/BLEOTA/ . It handles 4KB sectors, CRC16, retries, and optional signing (the example leaves signing disabled).
+- `shared/AtechWifiOta/`: shared SoftAP, authenticated local portal, streaming IDF OTA writer, validation, timeout, and post-reboot verification support used by all four firmware builds.
+- `WIFI_OTA_TESTING.md`: exact USB, BLE, macOS/iPhone Safari, Chrome, interruption, rejection, and recovery procedures.
 
-**One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` runs over Bluetooth. To change between demos, USB-flash the other demo baseline.
+**One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` can run over Bluetooth or Wi-Fi. To change between demos, USB-flash the other demo baseline.
 
 ## Hardware / setup
 
 - ESP32-S3 N16R8 (16MB flash, 8MB OPI PSRAM) such as your board.
-- Mac desktop Chrome, Bluetooth enabled; close nRF Connect on the phone so it cannot hold the board connection.
+- Mac desktop Chrome for BLE; Safari or Chrome on macOS/iPhone for Wi-Fi. Close nRF Connect and other clients so they cannot hold a BLE connection when entering Wi-Fi mode.
 - Cursor + PlatformIO installed and working (your earlier BLE blinky test confirms this).
-- Board plugged into USB-C for baseline provisioning. For the strongest radio proof, unplug it from the Mac and power it with a wall adapter or power bank during BLE commands and OTA. USB is **only for baseline provisioning or recovery**, not for the BLE update.
+- Board plugged into USB-C for baseline provisioning. For the strongest radio proof, unplug it from the Mac and power it with a wall adapter or power bank during OTA. USB is **only for baseline provisioning/recovery and credential capture**, not for the wireless update itself.
 - Existing N16R8 GPIO48 onboard NeoPixel assumed. If the RGB LED is on GPIO38 instead, change `LED_PIN` in source.
+- The checked-in DevKitC target uses GPIO0 for BOOT and GPIO48 for its RGB LED. A fresh three-second runtime BOOT hold enters/exits Wi-Fi OTA. A BOOT button already held during reset is deliberately ignored so the normal hold-BOOT/tap-RST ROM flashing sequence is unchanged. Set the Wi-Fi config's button pin to `-1` if the actual board does not expose a safe GPIO0 runtime button.
 
 ## Demo 1: fully controlled Atech web prototype
 
@@ -66,6 +69,7 @@ Keep that terminal open, then open **http://localhost:5173** in desktop Chrome. 
 ```
 
 `localhost` is a browser secure context; any remotely hosted dashboard must use HTTPS.
+The dashboard now checks `navigator.bluetooth`: Bluetooth is preferred when available, while Safari and other unsupported browsers are directed to the separate device-hosted Wi-Fi portal. The dashboard never POSTs firmware from its HTTPS/localhost origin to the board's HTTP origin.
 
 ### 3. Prove two-way BLE communication
 
@@ -107,17 +111,53 @@ Command requests and responses are fixed at 20 bytes so they fit the minimum BLE
 5. Select `.pio/build/updated/firmware.bin`, select **FLASH** / application firmware, start OTA.
 6. Wait for completion and reboot. Reconnect: FW version should read `demo2-2.0.0`, LED should blink GREEN quickly.
 
-This browser uploader and library are by gb88 (not included or copied in this package). **AGPL-3.0**: assess redistribution/network-service implications with counsel before embedding in a proprietary Atech product. For production, enable the upstream project's signed-image verification; this unsecure demo does not.
+This browser uploader and library are by gb88 (not included or copied in this package). **AGPL-3.0**: assess redistribution/network-service implications with counsel before embedding in a proprietary Atech product. The gb88 protocol is unchanged. Its optional firmware signing remains disabled in this demo; the independent Wi-Fi fallback does not alter that BLE security choice.
+
+## Wi-Fi OTA fallback (both demos)
+
+The base and updated images both include the same local portal. Demo 1 advertises `Atech-OTA-D1-<six-hex-device-suffix>`; Demo 2 advertises `Atech-OTA-D2-<suffix>`. Credentials are random per-device values stored in NVS so they survive the OTA reboot. They are printed at 115200 baud at boot and whenever Wi-Fi OTA starts:
+
+```text
+Wi-Fi OTA credentials (record securely during provisioning):
+  SSID: Atech-OTA-D1-123ABC
+  WPA2 password: <device-specific random value>
+  OTA authorization code: <different device-specific random value>
+  Portal: http://192.168.4.1
+```
+
+Record these during USB provisioning or place them in the device's protected deployment record. The portal does not reveal either secret. To override them for a managed test fixture, add the following two lines under the common `build_flags` in that demo's `platformio.ini` (use different values per device, keep the simple quoted character set, and never commit real credentials):
+
+```ini
+  '-DATECH_WIFI_AP_PASSWORD="D1fixture-WPA2-ChangeMe"'
+  '-DATECH_WIFI_OTA_TOKEN="D1fixture-Portal-Token-ChangeMe"'
+```
+
+The WPA2 value must contain 12–63 characters and the token at least 16. Remove the overrides to use the default NVS-persisted random values; erasing the demo's NVS namespace generates a new pair.
+
+1. Build the correct `updated` environment and locate its `.pio/build/updated/firmware.bin`.
+2. Make sure no BLE client is connected and no BLE OTA is running. While firmware is running, hold **BOOT** for about three seconds and release it without pressing RST. A connected/active BLE session makes the request fail closed; disconnect it and hold BOOT again.
+3. Join the demo's WPA2 hotspot. On iPhone, choose to remain connected without internet.
+4. In Safari or Chrome, type **http://192.168.4.1/** and enter the separate OTA authorization code.
+5. Select only the application `firmware.bin` and click **Deploy Firmware**. Browser upload percentage is not success: wait for the separate device-side **flash verified** response.
+6. The portal checks the declared size and CRC32 while streaming, rejects bootloader/partition/merged files, enforces ESP32-S3 + 16MB-board headers and the D1/D2 image identity, then calls `esp_ota_end()` for full ESP image integrity validation. It changes the boot partition only after validation succeeds.
+7. After success the board reboots and restores the same hotspot once, allowing the page to report the running version and previous version. Exit from the portal, hold BOOT for three seconds, or leave it inactive for ten minutes to stop the AP and restore BLE advertising.
+
+Only one updater can own flash. Wi-Fi mode cannot start while BLE is connected/running, BLE advertising is stopped for the AP session, concurrent HTTP updates are rejected, and aborted/incomplete HTTP bodies call `esp_ota_abort()` without selecting the inactive partition. Demo 1 also keeps its 30-second BLE transfer timeout; Demo 2 continues to use the upstream gb88 lifecycle.
+
+For Safari on iPhone, AirDrop the compiled `firmware.bin` to the phone and choose **Save to Files before joining the no-internet ESP32 hotspot**. In the local portal's picker, choose Browse and select it from Files. See [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) for exact per-demo macOS/iPhone, Chrome BLE regression, interruption, invalid-image, and USB recovery steps.
+
+The WPA2 credential and independent portal token provide two access checks, but this HTTP lab portal is not deployment-grade release authorization. A party with valid credentials can still submit any structurally valid image bearing the public demo marker. Production devices need provisioned/rotatable secrets, rate limiting, signed firmware enforced by Secure Boot, anti-rollback policy, protected signing keys, and an appropriate encrypted management channel.
 
 ## Offline verification
 
-These checks do not replace a physical transfer, but they verify the toolchain, both firmware variants, the partition binary, and Demo 1's browser protocol:
+These checks do not replace a physical transfer, but they verify the toolchain, all four firmware variants, the shared portal compilation, the partition binary, and Demo 1's browser protocol:
 
 ```sh
 cd demo1-custom-gatt
 pio run -e base && pio run -e updated
 node web/protocol.test.js
 node web/dashboard.test.js
+node ../shared/AtechWifiOta/portal.test.js
 
 cd ../demo2-bleota-library
 pio run -e base && pio run -e updated
@@ -131,20 +171,20 @@ The projects are pinned to PlatformIO Espressif32 8.0.0 / Arduino-ESP32 3.3.12. 
 - Do not install an OTA app compiled with the wrong board/partition layout, flash size or PSRAM config.
 - Flashing a different partition table over USB changes the existing layout; migrate carefully on boards carrying valuable persistent data.
 - If the board isn't advertising after USB upload, press **RST**, exactly as with the prior blinking project.
-- Chrome requires a user gesture to select Bluetooth devices and uses secure origin (`https://` or `http://localhost`). Safari on iPhone does **not** support Web Bluetooth; phone interface work comes after desktop tests.
-- OTA with CRC32/CRC16 **does not protect against malicious code**. Add asymmetric signatures, device authentication, release authorization, signed manifests, anti-rollback and secure boot for real deployments. Test low-power interruptions and connection loss. Use flash encryption if the threat model requires it.
+- Chrome requires a user gesture to select Bluetooth devices and uses a secure origin (`https://` or `http://localhost`). Safari on iPhone does **not** support Web Bluetooth, but it can use the local SoftAP portal without Web Bluetooth.
+- CRC32/CRC16 and the ESP image checksum detect corruption; they **do not establish who authorized the firmware**. The separate Wi-Fi token authenticates the portal request but is not a code signature. Add asymmetric signatures, signed manifests, anti-rollback and Secure Boot for real deployments. Test low-power interruptions and connection loss. Use flash encryption if the threat model requires it.
 - Both demos are starter prototypes; not certified for safety-critical use or validated on your particular board.
 
-## Evaluation plan (run on same board and firmware size)
+## Evaluation plan (run on the same board; record each exact image size)
 
-Perform 5 successful transfers per demo and record median of transfer duration, throughput, reboot/verify time and success rate; then try 10 adversarial runs each: disconnect mid-transfer, unplug mid-transfer, wrong-board bin, incomplete image, corrupted payload, change BLE range, and interrupted/retried upload.
+Perform five successful transfers per demo and transport, recording median transfer duration, throughput, reboot/verify time and success rate. Then run the adversarial BLE and Wi-Fi cases: disconnect mid-transfer, unplug mid-transfer, wrong-board/wrong-demo bin, incomplete image, corrupted payload, bad token, concurrent updater, range changes, timeout, and interrupted/retried upload.
 
-Use [BENCHMARKING.md](BENCHMARKING.md) for the repeatable procedure and `benchmark-results.csv` for raw results. Alternate `base` and `updated` images over BLE so every timed run starts from a working OTA-capable firmware.
+Use [BENCHMARKING.md](BENCHMARKING.md) for the repeatable procedure and `benchmark-results.csv` for raw results. Re-provision or alternate known images so every timed run starts from a working OTA-capable firmware.
 
 | Metric | Demo 1 (custom GATT) | Demo 2 (BLEOTA) | Acceptance target to set after first baseline |
 | --- | --- | --- | --- |
 | Setup / first-time flash | | | |
-| Transfer time for identical .bin size | | | |
+| Transfer time for recorded application bytes | | | |
 | Verified bytes per second | | | |
 | Update success (5 runs) | | | |
 | Recovery after disconnect | | | |
