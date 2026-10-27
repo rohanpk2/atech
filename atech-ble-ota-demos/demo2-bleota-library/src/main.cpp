@@ -14,11 +14,24 @@ Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 BLEOTAClass BLEOTA;
 BLEServer *server = nullptr;
 volatile bool connected = false;
+volatile bool abortRequested = false;
 bool wasConnected = false;
 
 class Callbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *) override { connected = true; }
-  void onDisconnect(BLEServer *) override { connected = false; }
+#if defined(CONFIG_NIMBLE_ENABLED)
+  void onConnect(BLEServer *bleServer, ble_gap_conn_desc *description) override {
+    bleServer->requestConnParams(description->conn_handle, 0x06, 0x12, 0, 2000);
+  }
+#elif defined(CONFIG_BLUEDROID_ENABLED)
+  void onConnect(BLEServer *bleServer, esp_ble_gatts_cb_param_t *parameters) override {
+    bleServer->updateConnParams(parameters->connect.remote_bda, 0x06, 0x12, 0, 2000);
+  }
+#endif
+  void onDisconnect(BLEServer *) override {
+    connected = false;
+    abortRequested = true;
+  }
 };
 
 void setup() {
@@ -44,20 +57,31 @@ void setup() {
 }
 
 void loop() {
+  if (abortRequested) {
+    abortRequested = false;
+    if (BLEOTA.isRunning()) {
+      BLEOTA.abort();
+      Serial.println("BLE OTA aborted after disconnect");
+    }
+  }
   BLEOTA.process();
   if (!connected && wasConnected) {
     delay(250);
     server->startAdvertising();
   }
   wasConnected = connected;
+  if (!BLEOTA.isRunning()) {
 #if DEMO_VERSION == 1
-  const uint32_t color = led.Color(0,0,40);
-  const uint32_t interval = 1200;
+    const uint32_t color = led.Color(0,0,40);
+    const uint32_t interval = 1200;
 #else
-  const uint32_t color = led.Color(0,40,0);
-  const uint32_t interval = 350;
+    const uint32_t color = led.Color(0,40,0);
+    const uint32_t interval = 350;
 #endif
-  led.setPixelColor(0, (millis()%interval < interval/2) ? color : 0);
-  led.show();
-  delay(20);
+    led.setPixelColor(0, (millis()%interval < interval/2) ? color : 0);
+    led.show();
+    delay(20);
+  } else {
+    delay(1);
+  }
 }

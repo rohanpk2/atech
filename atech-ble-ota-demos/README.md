@@ -18,8 +18,8 @@ These are implementation families rather than five mutually exclusive radio tech
 
 ## Folder guide
 
-- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. CRC32 validated before activating OTA slot. Stop-and-wait ACK after every flash write.
-- `demo2-bleota-library/`: **Second demo.** PlatformIO project based on the separately installed `gb88/BLEOTA` package; use its maintained Web Bluetooth dashboard at https://gb88.github.io/BLEOTA/ . It handles 4KB sectors, CRC16, retries, and optional signing (the example leaves signing disabled).
+- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write.
+- `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag; use its maintained Web Bluetooth dashboard at https://gb88.github.io/BLEOTA/ . It handles 4KB sectors, CRC16, retries, and optional signing (the example leaves signing disabled).
 
 **One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` runs over Bluetooth. To change between demos, USB-flash the other demo baseline.
 
@@ -42,7 +42,7 @@ These are implementation families rather than five mutually exclusive radio tech
 7. In **desktop Chrome** open http://localhost:5173 , press **Connect**, select `Atech-Custom-OTA`, choose the **updated** firmware bin, click Update Firmware.
 8. After transferring, the board reboots; reconnect and confirm dashboard shows `v2 / green blink` rather than `v1 / blue blink`.
 
-Notes: `localhost` is a browser secure context; when remotely hosting the dashboard use **HTTPS**. Leave the browser foregrounded during transfer. Try 120-byte chunks first, 60 then 20 if your Mac BLE negotiated a smaller MTU. This prototype uses a stop-and-wait flash ACK for each write; it may be slower than the library demo.
+Notes: `localhost` is a browser secure context; when remotely hosting the dashboard use **HTTPS**. Leave the browser foregrounded during transfer. Try 120-byte chunks first, 60 then 20 if your Mac BLE negotiated a smaller MTU. This prototype uses a stop-and-wait flash ACK for each write; it may be slower than the library demo. A disconnect or 30 seconds without OTA data aborts the partial write, leaving the prior firmware active and allowing a clean reconnect/retry.
 
 ## Demo 2: existing BLE OTA implementation / browser
 
@@ -54,6 +54,21 @@ Notes: `localhost` is a browser secure context; when remotely hosting the dashbo
 6. Wait for completion and reboot. Reconnect: FW version should read `demo2-2.0.0`, LED should blink GREEN quickly.
 
 This browser uploader and library are by gb88 (not included or copied in this package). **AGPL-3.0**: assess redistribution/network-service implications with counsel before embedding in a proprietary Atech product. For production, enable the upstream project's signed-image verification; this unsecure demo does not.
+
+## Offline verification
+
+These checks do not replace a physical transfer, but they verify the toolchain, both firmware variants, the partition binary, and Demo 1's browser protocol:
+
+```sh
+cd demo1-custom-gatt
+pio run -e base && pio run -e updated
+node web/protocol.test.js
+
+cd ../demo2-bleota-library
+pio run -e base && pio run -e updated
+```
+
+The projects are pinned to PlatformIO Espressif32 8.0.0 / Arduino-ESP32 3.3.12. PlatformIO labels the underlying board definition as N8/no-PSRAM, but the project overrides select the N16R8 settings: `qio_opi`, `BOARD_HAS_PSRAM`, a 16MB flash header, and the custom 16MB partition table.
 
 ## Critical pitfalls
 
@@ -69,6 +84,8 @@ This browser uploader and library are by gb88 (not included or copied in this pa
 
 Perform 5 successful transfers per demo and record median of transfer duration, throughput, reboot/verify time and success rate; then try 10 adversarial runs each: disconnect mid-transfer, unplug mid-transfer, wrong-board bin, incomplete image, corrupted payload, change BLE range, and interrupted/retried upload.
 
+Use [BENCHMARKING.md](BENCHMARKING.md) for the repeatable procedure and `benchmark-results.csv` for raw results. Alternate `base` and `updated` images over BLE so every timed run starts from a working OTA-capable firmware.
+
 | Metric | Demo 1 (custom GATT) | Demo 2 (BLEOTA) | Acceptance target to set after first baseline |
 | --- | --- | --- | --- |
 | Setup / first-time flash | | | |
@@ -82,7 +99,7 @@ Perform 5 successful transfers per demo and record median of transfer duration, 
 | Dashboard integration complexity | | | |
 | Licensing / maintenance burden | Original Atech code | AGPL-3.0 | |
 
-**Selection rule:** prefer the approach that reliably recovers from failed updates and can be secured, not necessarily the one with the fastest green LED change. Demo 1 likely has the simplest proprietary integration; Demo 2 is a strong transfer-protocol performance baseline. If the library's license is unacceptable, next try Espressif's vendor BLE OTA profile (#3).
+**Selection rule:** prefer the approach that reliably recovers from failed updates and can be secured, not necessarily the one with the fastest green LED change. For Atech, evolve Demo 1 into an Atech-owned, versioned sector/window protocol and keep its Web Bluetooth client inside the dashboard. Borrow the useful behavior demonstrated by Demo 2—sector CRCs, bounded retries, larger write-without-response packets, and optional compression—but do not make the AGPL library or its externally hosted UI the product boundary unless that licensing/dependency choice is intentional. Espressif's vendor BLE OTA profile is the next baseline to test before finalizing the wire protocol.
 
 ## Reference implementations / API docs
 

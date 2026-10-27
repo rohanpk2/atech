@@ -6,7 +6,9 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#if defined(CONFIG_BLUEDROID_ENABLED)
 #include <BLE2902.h>
+#endif
 #include <Update.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -22,6 +24,9 @@
 #define STATUS_UUID  "a7ec0004-2e47-4dd2-82a4-9c2cf6eaa001"
 #define INFO_UUID    "a7ec0005-2e47-4dd2-82a4-9c2cf6eaa001"
 
+constexpr uint16_t ESP32_S3_CHIP_ID = 9;
+constexpr uint32_t OTA_IDLE_TIMEOUT_MS = 30000;
+
 // Browser sends one packet, waits for a flash-level ACK, then sends the next.
 // 244 is an upper bound; the browser automatically tries smaller BLE chunks.
 struct Frame {
@@ -32,7 +37,8 @@ struct Frame {
 QueueHandle_t incoming;
 BLECharacteristic *statusCharacteristic = nullptr;
 BLEServer *bleServer = nullptr;
-bool deviceConnected = false;
+volatile bool deviceConnected = false;
+volatile bool disconnectPending = false;
 bool previouslyConnected = false;
 
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -41,6 +47,11 @@ uint32_t expectedSize = 0;
 uint32_t expectedCRC = 0;
 uint32_t runningCRC = 0xFFFFFFFFUL;
 uint32_t received = 0;
+uint32_t lastActivityMs = 0;
+
+uint16_t le16(const uint8_t *bytes) {
+  return uint16_t(bytes[0]) | (uint16_t(bytes[1]) << 8);
+}
 
 uint32_t le32(const uint8_t *bytes) {
   return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8)
@@ -86,13 +97,25 @@ private:
 
 class ConnectionCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *) override { deviceConnected = true; }
-  void onDisconnect(BLEServer *) override { deviceConnected = false; }
+#if defined(CONFIG_NIMBLE_ENABLED)
+  void onConnect(BLEServer *server, ble_gap_conn_desc *description) override {
+    server->requestConnParams(description->conn_handle, 0x06, 0x12, 0, 2000);
+  }
+#elif defined(CONFIG_BLUEDROID_ENABLED)
+  void onConnect(BLEServer *server, esp_ble_gatts_cb_param_t *parameters) override {
+    server->updateConnParams(parameters->connect.remote_bda, 0x06, 0x12, 0, 2000);
+  }
+#endif
+  void onDisconnect(BLEServer *) override {
+    deviceConnected = false;
+    disconnectPending = true;
+  }
 };
 
-void abortUpdate(uint8_t code = 0xE0) {
+void abortUpdate(uint8_t code = 0xE0, bool sendStatus = true) {
   if (updating) Update.abort();
   updating = false;
-  notifyStatus(code, received);
+  if (sendStatus && deviceConnected) notifyStatus(code, received);
 }
 
 void handleControl(const Frame &frame) {
@@ -109,6 +132,7 @@ void handleControl(const Frame &frame) {
       return;
     }
     updating = true;
+    lastActivityMs = millis();
     Serial.printf("OTA START %lu bytes\n", (unsigned long)expectedSize);
     notifyStatus(0x10, 0); // READY
   } else if (opcode == 0x02 && frame.length == 1) { // FINISH
@@ -140,6 +164,15 @@ void handleData(const Frame &frame) {
     notifyStatus(0xE7, received);
     return;
   }
+  // Reject images for another chip before any flash data is committed.
+  // Every browser packet used by this demo is at least 20 bytes.
+  if (received == 0 &&
+      (frame.length < 14 || frame.bytes[0] != 0xE9 ||
+       le16(&frame.bytes[12]) != ESP32_S3_CHIP_ID)) {
+    Serial.println("OTA image is not an ESP32-S3 application image");
+    abortUpdate(0xE9);
+    return;
+  }
   if (Update.write(const_cast<uint8_t *>(frame.bytes), frame.length) != frame.length) {
     Serial.printf("Update.write failed: %u\n", Update.getError());
     abortUpdate(0xE8);
@@ -147,6 +180,7 @@ void handleData(const Frame &frame) {
   }
   runningCRC = crc32Update(runningCRC, frame.bytes, frame.length);
   received += frame.length;
+  lastActivityMs = millis();
   notifyStatus(0x11, received); // ACK after flash write
 }
 
@@ -175,7 +209,9 @@ void setup() {
 
   statusCharacteristic = service->createCharacteristic(
       STATUS_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
+#if defined(CONFIG_BLUEDROID_ENABLED)
   statusCharacteristic->addDescriptor(new BLE2902());
+#endif
 
   BLECharacteristic *info = service->createCharacteristic(
       INFO_UUID, BLECharacteristic::PROPERTY_READ);
@@ -194,11 +230,25 @@ void setup() {
 }
 
 void loop() {
+  if (disconnectPending) {
+    disconnectPending = false;
+    if (updating) {
+      Serial.printf("OTA aborted after disconnect at %lu bytes\n",
+                    (unsigned long)received);
+      abortUpdate(0xE0, false);
+    }
+    xQueueReset(incoming);
+  }
+
   Frame frame;
   // No flash writes from the BLE callback task: main loop owns Update.
   if (xQueueReceive(incoming, &frame, 0) == pdTRUE) {
     if (frame.control) handleControl(frame);
     else handleData(frame);
+  }
+  if (updating && millis() - lastActivityMs > OTA_IDLE_TIMEOUT_MS) {
+    Serial.printf("OTA timed out at %lu bytes\n", (unsigned long)received);
+    abortUpdate(0xEA);
   }
   if (!deviceConnected && previouslyConnected) {
     delay(250);
