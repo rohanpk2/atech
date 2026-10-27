@@ -1,6 +1,6 @@
 # Atech ESP32-S3: browser-to-board BLE OTA evaluation
 
-**Status:** Two code demos packaged; **not yet verified on a physical ESP32-S3**. The JavaScript syntax and package structure can be checked offline, but the firmware and transfer reliability must be measured on the real board.
+**Status:** Demo 1's command dashboard and both firmware variants build and pass their offline protocol checks; Demo 2 remains available for comparison. **Neither end-to-end BLE path has been verified on a physical ESP32-S3 in this environment.** Transfer reliability must be measured on the real board.
 
 **User experience:** Operator opens a **web dashboard on Mac Chrome**, connects directly to the nearby ESP32-S3 over Bluetooth LE, chooses a *compiled* `firmware.bin`, clicks deploy, sees progress, watches the board reboot, and verifies a different LED behavior/version. **The firmware bytes themselves travel over BLE.** There is no requirement for the board to have Wi-Fi.
 
@@ -18,7 +18,7 @@ These are implementation families rather than five mutually exclusive radio tech
 
 ## Folder guide
 
-- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write.
+- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It provides safe LED/status commands, matched ESP32 acknowledgments, random-nonce connection proofs, and a real OTA path. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write.
 - `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag; use its maintained Web Bluetooth dashboard at https://gb88.github.io/BLEOTA/ . It handles 4KB sectors, CRC16, retries, and optional signing (the example leaves signing disabled).
 
 **One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` runs over Bluetooth. To change between demos, USB-flash the other demo baseline.
@@ -28,21 +28,75 @@ These are implementation families rather than five mutually exclusive radio tech
 - ESP32-S3 N16R8 (16MB flash, 8MB OPI PSRAM) such as your board.
 - Mac desktop Chrome, Bluetooth enabled; close nRF Connect on the phone so it cannot hold the board connection.
 - Cursor + PlatformIO installed and working (your earlier BLE blinky test confirms this).
-- Board plugged into USB-C for power. USB is **only for baseline provisioning or recovery**, not for the BLE update.
+- Board plugged into USB-C for baseline provisioning. For the strongest radio proof, unplug it from the Mac and power it with a wall adapter or power bank during BLE commands and OTA. USB is **only for baseline provisioning or recovery**, not for the BLE update.
 - Existing N16R8 GPIO48 onboard NeoPixel assumed. If the RGB LED is on GPIO38 instead, change `LED_PIN` in source.
 
 ## Demo 1: fully controlled Atech web prototype
 
-1. Open the `demo1-custom-gatt` directory in Cursor.
-2. Put the board into upload mode if necessary (hold BOOT, tap RST, release BOOT).
-3. In its Terminal run `pio run -e base -t upload`. This installs a BLUE, slow-blinking firmware that advertises `Atech-Custom-OTA`.
-4. Press **RST** once after upload if no advertisements appear.
-5. Run `pio run -e updated` (**compile only**, no upload). Firmware file: `demo1-custom-gatt/.pio/build/updated/firmware.bin`.
-6. From the repo's `demo1-custom-gatt` folder run `python3 -m http.server 5173 --directory web`.
-7. In **desktop Chrome** open http://localhost:5173 , press **Connect**, select `Atech-Custom-OTA`, choose the **updated** firmware bin, click Update Firmware.
-8. After transferring, the board reboots; reconnect and confirm dashboard shows `v2 / green blink` rather than `v1 / blue blink`.
+The new command/response characteristics are part of the baseline firmware. USB-flash `base` once even if an older Demo 1 build is already on the board.
 
-Notes: `localhost` is a browser secure context; when remotely hosting the dashboard use **HTTPS**. Leave the browser foregrounded during transfer. Try 120-byte chunks first, 60 then 20 if your Mac BLE negotiated a smaller MTU. This prototype uses a stop-and-wait flash ACK for each write; it may be slower than the library demo. A disconnect or 30 seconds without OTA data aborts the partial write, leaving the prior firmware active and allowing a clean reconnect/retry.
+### 1. Provision the board once over USB
+
+```sh
+cd ~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt
+pio run -e base -t upload
+```
+
+If upload mode is needed, hold **BOOT**, tap **RST**, release **BOOT**, then run the upload command again. Press **RST** once after upload if no advertisement appears. The base firmware reports `Atech demo1 / v1 / blue default` and slowly blinks blue.
+
+An optional serial log can run in a separate terminal while the board remains connected to the Mac:
+
+```sh
+cd ~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt
+pio device monitor -b 115200
+```
+
+### 2. Build the wireless update and launch the dashboard
+
+```sh
+cd ~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt
+pio run -e updated
+python3 -m http.server 5173 --directory web
+```
+
+Keep that terminal open, then open **http://localhost:5173** in desktop Chrome. The update image is:
+
+```text
+~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt/.pio/build/updated/firmware.bin
+```
+
+`localhost` is a browser secure context; any remotely hosted dashboard must use HTTPS.
+
+### 3. Prove two-way BLE communication
+
+1. Unplug the board from the Mac and power it from a wall adapter or power bank.
+2. Click **Connect device** and choose `Atech-Custom-OTA`.
+3. Click **Run BLE connection test**. A pass means the firmware echoed the dashboard's exact random 64-bit challenge; a completed browser write alone never passes the test.
+4. Enter `blink green` and click **Send command**. Confirm both the physical LED change and the **ESP32 ACK** card with the matching request ID, firmware version, state, and latency.
+5. Try `blink blue`, `stop blinking`, `get status`, or `ping`. All other text is rejected in the browser, and firmware only accepts the five corresponding opcodes.
+
+### 4. Perform and verify the real BLE OTA
+
+1. In **Update over Bluetooth**, choose `.pio/build/updated/firmware.bin`.
+2. Leave **120 bytes** selected initially and click **Deploy firmware**. If the first GATT payload is rejected, the client automatically retries with 20 bytes; 60 and 20 are also available manually.
+3. Keep Chrome foregrounded. Watch percentage, acknowledged bytes, and measured speed. Each increment is based on an ESP32 flash acknowledgment.
+4. After transfer, the ESP32 checks CRC32, selects the inactive OTA partition, and reboots. The dashboard attempts to reconnect to the already-authorized device for up to 30 seconds.
+5. The dashboard marks the update **Verified** only after the same device reports a changed firmware string and answers a fresh random PING. The updated image reports `Atech demo1 / v2 / green default`.
+6. Send `blink blue` or `get status` once more to prove the updated firmware still executes commands.
+
+A disconnect or 30 seconds without OTA data aborts the partial write, leaving the prior firmware active and allowing a clean reconnect/retry. If automatic post-reboot verification times out, the UI shows **Needs verification**, not success; press **Connect device** to retry against the already-authorized board.
+
+### Demo 1 command wire format
+
+Command requests and responses are fixed at 20 bytes so they fit the minimum BLE ATT payload. Both contain protocol version, little-endian 32-bit request ID, opcode, an 8-byte nonce, and CRC16/CCITT. The response also includes execution status, LED state, firmware version, and the echoed nonce. The browser rejects a response with the wrong CRC, request ID, opcode, or nonce.
+
+| Opcode | Command | Firmware action |
+| --- | --- | --- |
+| `0x01` | `ping` | Echo nonce and report live state |
+| `0x02` | `blink blue` | Blink the onboard LED blue |
+| `0x03` | `blink green` | Blink the onboard LED green |
+| `0x04` | `stop blinking` | Turn the onboard LED off |
+| `0x05` | `get status` | Report state without changing it |
 
 ## Demo 2: existing BLE OTA implementation / browser
 
@@ -63,6 +117,7 @@ These checks do not replace a physical transfer, but they verify the toolchain, 
 cd demo1-custom-gatt
 pio run -e base && pio run -e updated
 node web/protocol.test.js
+node web/dashboard.test.js
 
 cd ../demo2-bleota-library
 pio run -e base && pio run -e updated
