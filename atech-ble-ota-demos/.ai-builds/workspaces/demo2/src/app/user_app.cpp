@@ -1,9 +1,9 @@
 #include <AtechApp.h>
 
-static const uint8_t kBrightness = 40;
-static const uint32_t kOnMs = 150;
-static const uint32_t kOffMs = 150;
-static const uint32_t kPauseMs = 2000;
+static const int kBlinkCount = 3;
+static const unsigned long kOnMs = 150;
+static const unsigned long kOffMs = 150;
+static const unsigned long kPauseMs = 2000;
 
 void appSetup() {
   led.off();
@@ -11,8 +11,8 @@ void appSetup() {
 }
 
 void appLoop() {
-  for (int i = 0; i < 3; ++i) {
-    led.set(kBrightness, kBrightness, kBrightness);
+  for (int i = 0; i < kBlinkCount; ++i) {
+    led.set(40, 40, 40);
     delay(kOnMs);
     led.off();
     delay(kOffMs);

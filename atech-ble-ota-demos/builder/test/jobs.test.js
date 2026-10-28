@@ -115,3 +115,23 @@ test('jobs persist across store instances', async () => {
   assert.equal(loaded.prompt, 'Persist me');
   assert.equal(second.list(1)[0].id, job.id);
 });
+
+test('provider failures are stored as readable errors with secrets redacted', async () => {
+  const previous = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'unit-test-secret-value-1234';
+  try {
+    const failing = {name: 'fake', model: 'm',
+                     async generate() { throw new Error('rejected unit-test-secret-value-1234 and sk-ant-api03-ZZZZZZZZZZ'); }};
+    const workspace = fakeWorkspace([]);
+    const store = new JobStore({config: tempConfig(), provider: failing, deps: {
+      prepareWorkspace: workspace.prepareWorkspace, compileWorkspace: workspace.compileWorkspace, readApiHeader: () => '//',
+    }});
+    const done = await store.run(store.create({demo: 1, prompt: 'Blink'}).id);
+    assert.equal(done.state, 'failed');
+    assert.equal(done.error, 'rejected [redacted] and sk-ant-[redacted]');
+    const meta = JSON.parse(fs.readFileSync(path.join(store.jobsDir, done.id, 'meta.json'), 'utf8'));
+    assert.doesNotMatch(meta.error, /unit-test-secret|ZZZZ/);
+  } finally {
+    if (previous === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previous;
+  }
+});

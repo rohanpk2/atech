@@ -11,6 +11,7 @@ const {checkSource} = require('./source-policy');
 const {validateImage} = require('./image');
 const workspace = require('./workspace');
 const {buildSystemPrompt, buildMessages} = require('./generate');
+const {redactSecrets} = require('./redact');
 
 const STATES = ['queued', 'generating', 'compiling', 'repairing', 'validating', 'ready', 'failed'];
 const MAX_PROMPT = 4000;
@@ -237,7 +238,7 @@ class JobStore {
         return;
       }
     } catch (error) {
-      this.update(job, {state: 'failed', stage: 'Failed', error: error.message || String(error), firmware: null});
+      this.update(job, {state: 'failed', stage: 'Failed', error: redactSecrets(error.message || String(error)), firmware: null});
     }
   }
 }

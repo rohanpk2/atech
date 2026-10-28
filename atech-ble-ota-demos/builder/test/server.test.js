@@ -119,3 +119,35 @@ test('static dashboards are served and traversal is refused', async () => {
     server.close();
   }
 });
+
+test('API responses never contain the configured key, even when a provider error echoes it', async () => {
+  const secret = 'unit-test-secret-value-5678';
+  const previous = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = secret;
+  const config = tempConfig();
+  const jobs = new JobStore({config, provider: {name: 'fake', model: 'm', async generate() { throw new Error(`401 invalid key ${secret}`); }},
+                             deps: {readApiHeader: () => '//'}});
+  const server = createServer({config, jobs, installer: {manifest: () => ({builds: []}), partFile: () => null,
+                               ensureBaseBuild: async () => { throw new Error(`pio failed with ${secret}`); }}});
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const leak = new RegExp(secret);
+    assert.doesNotMatch(await (await fetch(`${base}/api/health`)).text(), leak);
+    const created = await fetch(`${base}/api/builds`, {method: 'POST', headers: {'content-type': 'application/json'},
+      body: JSON.stringify({demo: 1, prompt: 'Blink'})});
+    const {id} = await created.json();
+    const job = await waitForState(base, id, ['ready', 'failed']);
+    assert.equal(job.state, 'failed');
+    assert.equal(job.error, '401 invalid key [redacted]');
+    assert.doesNotMatch(await (await fetch(`${base}/api/builds/${id}`)).text(), leak);
+    assert.doesNotMatch(await (await fetch(`${base}/api/builds`)).text(), leak);
+    assert.doesNotMatch(await (await fetch(`${base}/api/builds/${id}/events`)).text(), leak);
+    const installer = await fetch(`${base}/api/installer/1/build`, {method: 'POST'});
+    assert.equal(installer.status, 500);
+    assert.doesNotMatch(await installer.text(), leak);
+  } finally {
+    server.close();
+    if (previous === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previous;
+  }
+});

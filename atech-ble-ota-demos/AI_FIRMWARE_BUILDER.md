@@ -16,7 +16,7 @@ Then open **http://localhost:5173/demo1/** or **http://localhost:5173/demo2/** i
 
 Model credentials, checked in this order:
 
-1. `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in the environment, or an `ant auth login` profile. The backend then uses the official `@anthropic-ai/sdk` with `claude-opus-5-5`, adaptive thinking and structured output.
+1. `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in the environment or in the git-ignored `builder/.env` file (copy `builder/.env.example`; loaded by `npm start`, shell values win and blank lines count as unset), or an `ant auth login` profile. Provider failures (invalid key, no credit, rate limit, outage, network) are reported on the job as plain-language errors; the key itself is never logged, stored or returned by the API. The backend then uses the official `@anthropic-ai/sdk` with `claude-opus-5-5`, adaptive thinking and structured output.
 2. Otherwise the locally installed `claude` CLI and its existing login (`claude -p --json-schema`). This is what ran the first end-to-end tests on this machine. It costs normal usage on that account (about $0.10 to $0.20 per generation here).
 
 `ATECH_LLM_PROVIDER=anthropic|claude-cli` forces one; `ATECH_LLM_MODEL` changes the model; `ATECH_MAX_REPAIRS` (default 3) bounds the repair loop; `ATECH_BUILDER_PORT`/`ATECH_BUILDER_HOST` or `--port`/`--host` change the listener. `--host 0.0.0.0` exposes the firmware download links to a phone on the same Wi-Fi for the Safari path; there is no Web Bluetooth on a non-localhost HTTP origin, so that only serves downloads.

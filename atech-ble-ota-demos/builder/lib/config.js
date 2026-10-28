@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const util = require('node:util');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 
@@ -19,6 +20,25 @@ function demoEntry(demo, key, name, imageIdentity, blePrefix, ssidPrefix, otaPro
   return {demo, key, name, dir, imageIdentity, blePrefix, ssidPrefix, otaProtocol,
           webDir: path.join(dir, 'web')};
 }
+
+// builder/.env (git-ignored) holds local settings such as ANTHROPIC_API_KEY.
+const DEFAULT_ENV_FILE = path.join(__dirname, '..', '.env');
+
+// Load KEY=value pairs from a dotenv file into env. Values already present in env win, so the
+// shell can still override the file. Blank values are treated as unset: a template line such as
+// `ANTHROPIC_API_KEY=` must not shadow a `claude` CLI or `ant auth login` session, which the
+// provider selection and the spawned CLI would otherwise see as a (bad) credential.
+// Returns true when the file was read; a missing file is not an error.
+function loadDotEnv(file = DEFAULT_ENV_FILE, env = process.env) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  for (const [key, value] of Object.entries(util.parseEnv(text))) {
+    if (value !== '' && env[key] === undefined) env[key] = value;
+  }
+  return true;
+}
+loadDotEnv.defaultFile = DEFAULT_ENV_FILE;
 
 function loadConfig(env = process.env) {
   const buildsDir = env.ATECH_BUILDS_DIR ? path.resolve(env.ATECH_BUILDS_DIR)
@@ -49,4 +69,4 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = {loadConfig, rootDir};
+module.exports = {loadConfig, loadDotEnv, rootDir};

@@ -7,12 +7,13 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const {loadConfig} = require('./lib/config');
+const {loadConfig, loadDotEnv} = require('./lib/config');
 const gpio = require('./lib/gpio-policy');
 const {JobStore} = require('./lib/jobs');
 const installerModule = require('./lib/installer');
 const {selectProvider} = require('./lib/generate');
 const {runPio} = require('./lib/pio');
+const {redactSecrets} = require('./lib/redact');
 
 const MAX_BODY = 64 * 1024;
 const MIME = {
@@ -190,7 +191,7 @@ function createServer({config, jobs, installer = installerModule, pioVersion = n
       const result = await installer.ensureBaseBuild(Number(demo), {config});
       sendJson(res, 200, {ok: true, built: result.built});
     } catch (error) {
-      sendJson(res, 500, {error: error.message});
+      sendJson(res, 500, {error: redactSecrets(error.message)});
     }
   });
 
@@ -210,7 +211,7 @@ function createServer({config, jobs, installer = installerModule, pioVersion = n
       if (pathname.startsWith('/shared/')) { serveStatic(res, config.webSharedDir, pathname.slice('/shared/'.length)); return; }
       sendJson(res, 404, {error: 'Not found'});
     } catch (error) {
-      if (!res.headersSent) sendJson(res, error.message?.includes('body') ? 400 : 500, {error: error.message});
+      if (!res.headersSent) sendJson(res, error.message?.includes('body') ? 400 : 500, {error: redactSecrets(error.message)});
       else res.end();
     }
   });
@@ -221,6 +222,7 @@ async function main() {
   const args = process.argv.slice(2);
   const hostIndex = args.indexOf('--host');
   const portIndex = args.indexOf('--port');
+  loadDotEnv(); // builder/.env, if present; shell variables take precedence
   const config = loadConfig(process.env);
   if (hostIndex >= 0) config.host = args[hostIndex + 1];
   if (portIndex >= 0) config.port = Number(args[portIndex + 1]);
@@ -264,7 +266,7 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(error => { console.error(error.message); process.exit(1); });
+  main().catch(error => { console.error(redactSecrets(error.message)); process.exit(1); });
 }
 
 module.exports = {createServer, safeJoin};
