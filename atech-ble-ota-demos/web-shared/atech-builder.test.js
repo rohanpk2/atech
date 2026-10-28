@@ -15,7 +15,9 @@ const KNOWN_IDS = new Set(['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSumm
   'devDot', 'devBadge', 'devStatus', 'devWifi', 'devIp', 'devBle', 'devFind', 'devForget', 'devList', 'devPairForm',
   'devPairHost', 'devPairToken', 'devPair', 'devHint', 'wifiTransportPanel',
   'deployStatus', 'deployBadge', 'deployProgress', 'deployProgressBar', 'deployTransport', 'deployPercent',
-  'deployBytes', 'deploySpeed', 'deployEta', 'deployTime', 'deployPhases', 'deployChecks', 'deployAbort']);
+  'deployBytes', 'deploySpeed', 'deployEta', 'deployTime', 'deployPhases', 'deployChecks', 'deployAbort',
+  // step flow: scan bar, board facts disclosure, deployment numbers, step markers
+  'devProgress', 'devFacts', 'deployMeta', 'stepConnect', 'stepDescribe', 'stepDeploy']);
 const referenced = [...source.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]);
 assert.ok(referenced.length > 10, 'module must address the builder card by element id');
 assert.deepEqual(referenced.filter(id => !KNOWN_IDS.has(id)), [], 'every referenced id must be documented');
