@@ -1,0 +1,216 @@
+Warning! Ignore unknown configuration option `build_cache_dir` in section [env]
+Processing ai (platform: espressif32 @ 8.0.0; board: esp32-s3-devkitc-1; framework: arduino)
+--------------------------------------------------------------------------------
+Library Manager: Installing adafruit/Adafruit NeoPixel @ 1.15.5
+Unpacking...
+Library Manager: Adafruit NeoPixel@1.15.5 has been installed!
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/esp32-s3-devkitc-1.html
+PLATFORM: Espressif 32 (8.0.0) > Espressif ESP32-S3-DevKitC-1-N8 (8 MB QD, No PSRAM)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 8MB Flash
+DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - framework-arduinoespressif32 @ 4.30312.261016 (3.3.12) 
+ - framework-arduinoespressif32-esp32s3-libs @ 3.3.12 
+ - tool-esptool @ 2.50400.0 (5.4.0) 
+ - tool-riscv32-esp-elf-gdb @ 12.1.0+20221002 
+ - tool-xtensa-esp-elf-gdb @ 12.1.0+20221002 
+ - toolchain-riscv32-esp @ 14.2.0+20260121 
+ - toolchain-xtensa-esp-elf @ 14.2.0+20260121
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 47 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- Adafruit NeoPixel @ 1.15.5
+|-- AtechCore @ 1.0.0
+|-- AtechWifiOta @ 1.0.0
+|-- BLE @ 3.3.12
+|-- Update @ 3.3.12
+Building in release mode
+Compiling .pio/build/ai/src/app/user_app.cpp.o
+Compiling .pio/build/ai/src/main.cpp.o
+Building .pio/build/ai/bootloader.bin
+Generating partitions .pio/build/ai/partitions.bin
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/Adafruit_NeoPixel.cpp.o
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/Adafruit_Neopixel_RP2.cpp.o
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/esp.c.o
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/esp8266.c.o
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/kendyte_k210.c.o
+Compiling .pio/build/ai/libbba/Adafruit NeoPixel/psoc6.c.o
+Compiling .pio/build/ai/libfd8/Preferences/Preferences.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLE2901.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLE2902.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLE2904.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEAddress.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEAdvertisedDevice.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEAdvertising.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEBeacon.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLECharacteristic.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLECharacteristicMap.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEClient.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEDescriptor.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEDescriptorMap.cpp.o
+Archiving .pio/build/ai/libbba/libAdafruit NeoPixel.a
+Indexing .pio/build/ai/libbba/libAdafruit NeoPixel.a
+Compiling .pio/build/ai/liba8a/BLE/BLEDevice.cpp.o
+Archiving .pio/build/ai/libfd8/libPreferences.a
+Indexing .pio/build/ai/libfd8/libPreferences.a
+Compiling .pio/build/ai/liba8a/BLE/BLEEddystoneTLM.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEEddystoneURL.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEExceptions.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEHIDDevice.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLERemoteCharacteristic.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLERemoteDescriptor.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLERemoteService.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEScan.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLESecurity.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEServer.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEService.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEServiceMap.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEUUID.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/BLEUtils.cpp.o
+esptool v5.4.0
+Compiling .pio/build/ai/liba8a/BLE/BLEValue.cpp.o
+Creating ESP32-S3 image...
+Merged 2 ELF sections.
+Successfully created ESP32-S3 image.
+Compiling .pio/build/ai/liba8a/BLE/FreeRTOS.cpp.o
+Compiling .pio/build/ai/liba8a/BLE/GeneralUtils.cpp.o
+Compiling .pio/build/ai/lib400/Hash/PBKDF2_HMACBuilder.cpp.o
+Compiling .pio/build/ai/lib400/Hash/SHA1Builder.cpp.o
+Compiling .pio/build/ai/lib400/Hash/SHA2Builder.cpp.o
+Compiling .pio/build/ai/lib400/Hash/SHA3Builder.cpp.o
+Compiling .pio/build/ai/lib484/Update/HttpsOTAUpdate.cpp.o
+Compiling .pio/build/ai/lib484/Update/Updater.cpp.o
+Compiling .pio/build/ai/lib484/Update/UpdaterSHA256.cpp.o
+Compiling .pio/build/ai/lib484/Update/UpdaterSHA512.cpp.o
+Compiling .pio/build/ai/lib484/Update/Updater_Signing.cpp.o
+Compiling .pio/build/ai/lib836/AtechCore/AtechCore.cpp.o
+Compiling .pio/build/ai/lib0a5/AsyncUDP/AsyncUDP.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkClient.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkEvents.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkInterface.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkManager.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkServer.cpp.o
+Compiling .pio/build/ai/lib5c2/Network/NetworkUdp.cpp.o
+Archiving .pio/build/ai/lib400/libHash.a
+Indexing .pio/build/ai/lib400/libHash.a
+Compiling .pio/build/ai/lib8fa/WiFi/AP.cpp.o
+Compiling .pio/build/ai/lib8fa/WiFi/STA.cpp.o
+Compiling .pio/build/ai/lib8fa/WiFi/WiFi.cpp.o
+Compiling .pio/build/ai/lib8fa/WiFi/WiFiAP.cpp.o
+Compiling .pio/build/ai/lib8fa/WiFi/WiFiGeneric.cpp.o
+Archiving .pio/build/ai/lib484/libUpdate.a
+Indexing .pio/build/ai/lib484/libUpdate.a
+Archiving .pio/build/ai/liba8a/libBLE.a
+Compiling .pio/build/ai/lib8fa/WiFi/WiFiMulti.cpp.o
+Indexing .pio/build/ai/liba8a/libBLE.a
+Compiling .pio/build/ai/lib8fa/WiFi/WiFiSTA.cpp.o
+Archiving .pio/build/ai/lib0a5/libAsyncUDP.a
+Indexing .pio/build/ai/lib0a5/libAsyncUDP.a
+Compiling .pio/build/ai/lib8fa/WiFi/WiFiScan.cpp.o
+Compiling .pio/build/ai/libd46/DNSServer/DNSServer.cpp.o
+Compiling .pio/build/ai/lib4ed/FS/FS.cpp.o
+Compiling .pio/build/ai/lib4ed/FS/vfs_api.cpp.o
+Archiving .pio/build/ai/lib836/libAtechCore.a
+Indexing .pio/build/ai/lib836/libAtechCore.a
+Compiling .pio/build/ai/lib882/WebServer/Parsing.cpp.o
+Compiling .pio/build/ai/lib882/WebServer/WebServer.cpp.o
+Compiling .pio/build/ai/lib882/WebServer/detail/mimetable.cpp.o
+Archiving .pio/build/ai/lib5c2/libNetwork.a
+Indexing .pio/build/ai/lib5c2/libNetwork.a
+Compiling .pio/build/ai/lib882/WebServer/middleware/AuthenticationMiddleware.cpp.o
+Compiling .pio/build/ai/lib882/WebServer/middleware/CorsMiddleware.cpp.o
+Compiling .pio/build/ai/lib882/WebServer/middleware/LoggingMiddleware.cpp.o
+Compiling .pio/build/ai/lib882/WebServer/middleware/MiddlewareChain.cpp.o
+Compiling .pio/build/ai/lib5a6/AtechWifiOta/AtechWifiOta.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/ColorFormat.c.o
+Compiling .pio/build/ai/FrameworkArduino/Esp.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/FirmwareMSC.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/FunctionalInterrupt.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/HEXBuilder.cpp.o
+Archiving .pio/build/ai/lib8fa/libWiFi.a
+Indexing .pio/build/ai/lib8fa/libWiFi.a
+Compiling .pio/build/ai/FrameworkArduino/HWCDC.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/HardwareSerial.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/HashBuilder.cpp.o
+Archiving .pio/build/ai/libd46/libDNSServer.a
+Archiving .pio/build/ai/lib4ed/libFS.a
+Indexing .pio/build/ai/libd46/libDNSServer.a
+Indexing .pio/build/ai/lib4ed/libFS.a
+Compiling .pio/build/ai/FrameworkArduino/IPAddress.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/MD5Builder.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/MacAddress.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/Print.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/Stream.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/StreamString.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/StringUtils.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/Tone.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/USB.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/USBCDC.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/USBHost.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/USBMSC.cpp.o
+Archiving .pio/build/ai/lib882/libWebServer.a
+Indexing .pio/build/ai/lib882/libWebServer.a
+Compiling .pio/build/ai/FrameworkArduino/WMath.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/WString.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/base64.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/cbuf.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/chip-debug-report.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-adc.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-bt.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-cpu.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-dac.c.o
+Archiving .pio/build/ai/lib5a6/libAtechWifiOta.a
+Indexing .pio/build/ai/lib5a6/libAtechWifiOta.a
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-gpio.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-hosted.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-i2c-ng.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-i2c-slave.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-i2c.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-ldo.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-ledc.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-log-wrapper.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-matrix.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-misc.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-periman.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-psram.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-rgb-led.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-rmt.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-sigmadelta.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-spi.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-time.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-timer.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-tinyusb.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-touch-ng.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-touch.c.o
+Compiling .pio/build/ai/FrameworkArduino/esp32-hal-uart.c.o
+Compiling .pio/build/ai/FrameworkArduino/firmware_msc_fat.c.o
+Compiling .pio/build/ai/FrameworkArduino/freertos_stats.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/idf_openthread_mpool_wrapper.c.o
+Compiling .pio/build/ai/FrameworkArduino/libb64/cdecode.c.o
+Compiling .pio/build/ai/FrameworkArduino/libb64/cencode.c.o
+Compiling .pio/build/ai/FrameworkArduino/main.cpp.o
+Compiling .pio/build/ai/FrameworkArduino/stdlib_noniso.c.o
+Compiling .pio/build/ai/FrameworkArduino/wiring_pulse.c.o
+Compiling .pio/build/ai/FrameworkArduino/wiring_shift.c.o
+Archiving .pio/build/ai/libFrameworkArduino.a
+Indexing .pio/build/ai/libFrameworkArduino.a
+Linking .pio/build/ai/firmware.elf
+Retrieving maximum program size .pio/build/ai/firmware.elf
+Checking size .pio/build/ai/firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  15.0% (used 49156 bytes from 327680 bytes)
+Flash: [==        ]  22.2% (used 1394447 bytes from 6291456 bytes)
+Building .pio/build/ai/firmware.bin
+esptool v5.4.0
+Creating ESP32-S3 image...
+Merged 3 ELF sections.
+Successfully created ESP32-S3 image.
+========================= [SUCCESS] Took 21.66 seconds =========================
+
+Environment    Status    Duration
+-------------  --------  ------------
+ai             SUCCESS   00:00:21.660
+========================= 1 succeeded in 00:00:21.660 =========================

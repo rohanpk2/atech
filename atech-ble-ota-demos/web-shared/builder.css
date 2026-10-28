@@ -1,0 +1,65 @@
+/* AI firmware builder card. Relies on the dashboard stylesheet for tokens,
+   .card, .btn, .badge, .state, .chip and .progress. */
+.ai-card .card-head { align-items: flex-start; }
+.ai-backend { color: var(--muted); font-size: 12px; }
+.ai-backend.ok { color: var(--green-text); }
+.ai-backend.error { color: var(--red-text); }
+.ai-prompt {
+  width: 100%;
+  min-height: 84px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.ai-prompt:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-ring); }
+.ai-examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ai-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.ai-actions .spacer { flex: 1; }
+.ai-attempts { color: var(--muted); font-size: 12px; }
+.ai-target { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.ai-target.warn { border-color: var(--red-line); background: var(--red-soft); color: var(--red-text); }
+.ai-review { margin-top: 16px; }
+.ai-review h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.ai-summary { margin: 0 0 8px; font-size: 13px; }
+.ai-code-meta { display: block; margin-bottom: 8px; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.ai-code {
+  max-height: 360px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+}
+.ai-diags { display: grid; gap: 6px; margin-top: 12px; }
+.ai-diag { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); font-size: 12px; }
+.ai-diag pre { margin: 0; font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-diag-kind { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+.ai-diag.error { border-color: var(--red-line); background: var(--red-soft); }
+.ai-diag.error .ai-diag-kind { color: var(--red-text); }
+.ai-diag.policy { border-color: var(--red-line); background: var(--red-soft); }
+.ai-diag.policy .ai-diag-kind { color: var(--red-text); }
+.ai-diag.warning .ai-diag-kind { color: var(--amber-text); }
+.ai-note { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--blue-line); border-radius: var(--radius-sm); background: var(--blue-soft); color: var(--blue-hover); font-size: 12px; }
+.ai-deploy-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
+.ai-recovery { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ai-progress { margin-top: 12px; }
+
+@media (max-width: 600px) {
+  .ai-actions .btn, .ai-deploy-row .btn { flex: 1 1 100%; }
+  .ai-diag { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-card .progress div { transition-duration: .01ms !important; }
+}

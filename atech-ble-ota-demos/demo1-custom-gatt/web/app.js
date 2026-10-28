@@ -7,6 +7,8 @@ const STATUS = 'a7ec0004-2e47-4dd2-82a4-9c2cf6eaa001';
 const INFO = 'a7ec0005-2e47-4dd2-82a4-9c2cf6eaa001';
 const COMMAND = 'a7ec0006-2e47-4dd2-82a4-9c2cf6eaa001';
 const RESPONSE = 'a7ec0007-2e47-4dd2-82a4-9c2cf6eaa001';
+// Shared Atech identity service (a7ec0100): a7ec0101 identity, a7ec0102 control, a7ec0103 events.
+const IDENTITY_CHARACTERISTIC = 'a7ec0101-2e47-4dd2-82a4-9c2cf6eaa001';
 const OTA_SLOT_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 8000;
 const protocol = globalThis.AtechOtaProtocol;
@@ -21,7 +23,11 @@ let statusChar = null;
 let infoChar = null;
 let commandChar = null;
 let responseChar = null;
+let identityChar = null;
+let identityControlChar = null;
+let identityEventChar = null;
 let currentFirmwareInfo = 'Unknown';
+let currentIdentity = null;
 let transferring = false;
 let otaPhase = 'idle';
 let otaWaiter = null;
@@ -32,9 +38,11 @@ let challengeAttempts = 0;
 let challengeSuccesses = 0;
 let pendingOtaVerification = null;
 let selectedFileValid = false;
+let builder = null;
 const bluetoothAvailable = window.isSecureContext && Boolean(navigator.bluetooth);
 let selectedTransport = bluetoothAvailable ? 'ble' : 'wifi';
 const pendingCommands = new Map();
+const pendingControls = new Map();
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -128,6 +136,7 @@ function refreshButtons() {
   $('bin').disabled = transferring;
   $('chunk').disabled = transferring;
   $('deploy').disabled = transferring || !connected || !selectedFileValid;
+  if (builder) builder.refresh();
 }
 
 function updateLastSeen() {
@@ -137,6 +146,22 @@ function updateLastSeen() {
 
 function clearGattHandles() {
   controlChar = dataChar = statusChar = infoChar = commandChar = responseChar = null;
+  identityChar = identityControlChar = identityEventChar = null;
+}
+
+function renderIdentity() {
+  if (!currentIdentity) {
+    $('deviceId').textContent = 'Unknown';
+    $('pairingCode').textContent = 'Unknown';
+    $('appInfo').textContent = 'Unknown';
+    return;
+  }
+  $('deviceId').textContent = currentIdentity.id;
+  $('pairingCode').textContent = currentIdentity.suffix;
+  let appText = `${currentIdentity.app} v${currentIdentity.ver} (build ${currentIdentity.build}, ${currentIdentity.appState})`;
+  if (currentIdentity.safe) appText += ', SAFE MODE';
+  if (currentIdentity.pending) appText += ', pending confirmation';
+  $('appInfo').textContent = appText;
 }
 
 function rejectOtaWaiter(error) {
@@ -153,6 +178,11 @@ function rejectAllCommands(error) {
     pending.reject(error);
   }
   pendingCommands.clear();
+  for (const pending of pendingControls.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+  pendingControls.clear();
 }
 
 function stopHeartbeat() {
@@ -231,6 +261,61 @@ function onCommandResponse(event) {
   pending.resolve({...response, latencyMs});
 }
 
+function onControlEvent(event) {
+  const value = event.target.value;
+  const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  let parsed;
+  try {
+    parsed = AtechIdentity.parseControlEvent(bytes);
+  } catch (error) {
+    log(`Ignored malformed control event: ${error.message}`, 'ESP32 ACK', 'error');
+    return;
+  }
+  updateLastSeen();
+  const key = protocol.bytesToHex(parsed.nonce);
+  const pending = pendingControls.get(key);
+  if (!pending) {
+    log(`Unmatched control event ${parsed.name} (${parsed.statusText}).`, 'ESP32 ACK', 'warn');
+    return;
+  }
+  pendingControls.delete(key);
+  clearTimeout(pending.timer);
+  log(`Core ${parsed.name}: ${parsed.statusText}.`, 'ESP32 ACK', parsed.status === 0 ? 'success' : 'error');
+  pending.resolve(parsed);
+}
+
+async function readIdentity() {
+  if (!identityChar) throw new Error('The connected firmware has no Atech identity service');
+  const raw = await identityChar.readValue();
+  currentIdentity = AtechIdentity.parseIdentity(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+  renderIdentity();
+  if (builder) builder.refresh();
+  return currentIdentity;
+}
+
+async function sendControl(opcode, {timeout = 5000} = {}) {
+  if (!isConnected() || !identityControlChar) throw new Error('Connect to a board with the Atech identity service first');
+  const nonce = AtechIdentity.randomNonce();
+  const key = protocol.bytesToHex(nonce);
+  const packet = AtechIdentity.buildControlPacket(opcode, nonce);
+  const eventPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingControls.delete(key);
+      reject(new Error(`Timed out waiting for the core to answer ${AtechIdentity.CONTROL_NAMES[opcode]}`));
+    }, timeout);
+    pendingControls.set(key, {resolve, reject, timer});
+  });
+  eventPromise.catch(() => {});
+  try {
+    await identityControlChar.writeValueWithResponse(packet);
+  } catch (error) {
+    const pending = pendingControls.get(key);
+    if (pending) { clearTimeout(pending.timer); pendingControls.delete(key); pending.reject(error); }
+    throw error;
+  }
+  return eventPromise;
+}
+
 async function connectGatt() {
   if (!device) throw new Error('No Bluetooth device has been selected');
   setConnectionState('connecting', 'Connecting…');
@@ -253,11 +338,30 @@ async function connectGatt() {
     new Uint8Array(rawInfo.buffer, rawInfo.byteOffset, rawInfo.byteLength)
   ).replace(/\0/g, '').trim();
 
+  currentIdentity = null;
+  try {
+    const identityService = await server.getPrimaryService(AtechIdentity.IDENTITY_SERVICE);
+    [identityChar, identityControlChar, identityEventChar] = await Promise.all([
+      identityService.getCharacteristic(IDENTITY_CHARACTERISTIC),
+      identityService.getCharacteristic(AtechIdentity.CONTROL_CHAR),
+      identityService.getCharacteristic(AtechIdentity.EVENT_CHAR),
+    ]);
+    identityEventChar.addEventListener('characteristicvaluechanged', onControlEvent);
+    await identityEventChar.startNotifications();
+    await readIdentity();
+  } catch (error) {
+    identityChar = identityControlChar = identityEventChar = null;
+    renderIdentity();
+    log(`No Atech identity service on this firmware (${error.message}). Flash the current base image to use the AI builder.`,
+        'BROWSER', 'warn');
+  }
+
   $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
   $('firmwareVersion').textContent = currentFirmwareInfo;
   setConnectionState('online', 'Connected');
   setSignalState('waiting', 'Waiting');
-  log(`GATT ready on ${device.name || 'ESP32-S3'}, ${currentFirmwareInfo}.`, 'BROWSER', 'success');
+  log(`GATT ready on ${device.name || 'ESP32-S3'}, ${currentFirmwareInfo}` +
+      (currentIdentity ? `, ${currentIdentity.id}.` : '.'), 'BROWSER', 'success');
   refreshButtons();
   return currentFirmwareInfo;
 }
@@ -271,7 +375,7 @@ async function selectAndConnect() {
   } else {
     device = await navigator.bluetooth.requestDevice({
       filters: [{namePrefix: 'Atech-Custom-OTA'}],
-      optionalServices: [SERVICE],
+      optionalServices: [SERVICE, AtechIdentity.IDENTITY_SERVICE],
     });
     observeDevice(device);
   }
@@ -457,7 +561,16 @@ async function finishOtaVerification() {
   if (device.id !== pendingOtaVerification.deviceId) {
     throw new Error('Connected device does not match the board that received the update');
   }
-  if (currentFirmwareInfo === pendingOtaVerification.previousVersion) {
+  if (pendingOtaVerification.deviceIdentity && currentIdentity &&
+      currentIdentity.id !== pendingOtaVerification.deviceIdentity) {
+    throw new Error(`Reconnected board reports ${currentIdentity.id}, not ${pendingOtaVerification.deviceIdentity}`);
+  }
+  if (pendingOtaVerification.buildId) {
+    if (!currentIdentity) throw new Error('Board reconnected without an identity service; the new image is not running');
+    if (currentIdentity.build !== pendingOtaVerification.buildId) {
+      throw new Error(`Board reports build ${currentIdentity.build}, expected ${pendingOtaVerification.buildId}`);
+    }
+  } else if (currentFirmwareInfo === pendingOtaVerification.previousVersion) {
     throw new Error(`Board reconnected but still reports ${currentFirmwareInfo}`);
   }
 
@@ -465,7 +578,7 @@ async function finishOtaVerification() {
     nonce: randomNonce(), timeout: 5000, quiet: true, allowDuringTransfer: true,
   });
   const reportedVersion = currentFirmwareInfo.match(/\/ v(\d+) \//)?.[1];
-  if (reportedVersion && Number(reportedVersion) !== pong.firmwareVersion) {
+  if (reportedVersion && (Number(reportedVersion) & 0xFF) !== pong.firmwareVersion) {
     throw new Error('Firmware info and command acknowledgment versions disagree');
   }
 
@@ -498,19 +611,24 @@ async function reconnectAndVerifyOta() {
   throw new Error(`Automatic verification timed out: ${lastError.message}. Press Connect to retry verification.`);
 }
 
-async function deploy() {
-  if (!isConnected() || !$('bin').files.length) return;
-  if (!selectedFileValid) throw new Error('Select a valid ESP32-S3 firmware.bin first');
-  const file = $('bin').files[0];
-  if (!file.name.toLowerCase().endsWith('.bin')) throw new Error('Choose a compiled firmware.bin file');
-  const bytes = new Uint8Array(await file.arrayBuffer());
+// Streams an application image over the custom GATT protocol, waits for the
+// reboot, reconnects and verifies. Used by the file picker and by the AI
+// builder (which passes the build id it expects to see after reboot).
+async function deployBytes(bytes, meta = {}) {
+  if (!isConnected()) throw new Error('Connect to the ESP32 first');
+  if (transferring) throw new Error('A transfer is already in progress');
+  const label = meta.fileName || meta.appName || 'firmware.bin';
   if (bytes.length < 1024 || bytes.length > OTA_SLOT_BYTES) {
     throw new Error('Firmware does not fit the 6 MiB OTA slot');
+  }
+  if (currentIdentity && bytes.length > currentIdentity.slotSize) {
+    throw new Error(`Firmware is larger than the board's ${formatBytes(currentIdentity.slotSize)} OTA slot`);
   }
   protocol.validateEsp32S3Application(bytes);
   const hash = protocol.crc32(bytes);
   const previousVersion = currentFirmwareInfo;
   const selectedDeviceId = device.id;
+  const deviceIdentity = currentIdentity ? currentIdentity.id : null;
   const startPacket = protocol.buildStartPacket(bytes.length, hash);
   const startedAt = performance.now();
   let initialized = false;
@@ -520,7 +638,7 @@ async function deploy() {
   stopHeartbeat();
   refreshButtons();
   updateProgress(0, bytes.length, startedAt);
-  log(`${file.name} validated, ${formatBytes(bytes.length)}, CRC32 0x${hash.toString(16).padStart(8, '0')}.`,
+  log(`${label} validated, ${formatBytes(bytes.length)}, CRC32 0x${hash.toString(16).padStart(8, '0')}.`,
       'BROWSER', 'success');
 
   try {
@@ -557,11 +675,13 @@ async function deploy() {
     const seconds = (performance.now() - startedAt) / 1000;
     log(`Transfer accepted in ${seconds.toFixed(1)} s at ${(bytes.length / seconds / 1024).toFixed(1)} KiB/s. Success is still pending reboot verification.`,
         'ESP32 ACK', 'success');
-    pendingOtaVerification = {deviceId: selectedDeviceId, previousVersion, fileName: file.name};
+    pendingOtaVerification = {deviceId: selectedDeviceId, deviceIdentity, previousVersion,
+                              fileName: label, buildId: meta.buildId || null};
     otaPhase = 'rebooting';
     setOtaState('Image transferred and CRC-validated. Waiting for the ESP32 to reboot. The update is not yet verified.',
                 'working', 'Rebooting');
     await reconnectAndVerifyOta();
+    return {identity: currentIdentity, firmwareInfo: currentFirmwareInfo};
   } catch (error) {
     log(error.message, 'BROWSER', 'error');
     if (otaPhase === 'uploading') {
@@ -579,6 +699,15 @@ async function deploy() {
     refreshButtons();
     if (isConnected()) startHeartbeat();
   }
+}
+
+async function deploy() {
+  if (!isConnected() || !$('bin').files.length) return;
+  if (!selectedFileValid) throw new Error('Select a valid ESP32-S3 firmware.bin first');
+  const file = $('bin').files[0];
+  if (!file.name.toLowerCase().endsWith('.bin')) throw new Error('Choose a compiled firmware.bin file');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await deployBytes(bytes, {fileName: file.name});
 }
 
 async function validateSelectedFile() {
@@ -665,8 +794,25 @@ if (!bluetoothAvailable) {
   $('useBluetooth').disabled = true;
 }
 
+// Transport handed to the shared AI firmware builder card.
+window.AtechDemo1Transport = {
+  name: 'custom GATT OTA',
+  bluetoothAvailable,
+  isConnected,
+  identity: () => currentIdentity,
+  readIdentity,
+  deploy: deployBytes,
+  control: opcode => sendControl(opcode),
+};
+
 setConnectionState('offline', 'Disconnected');
 setSignalState('offline', 'None');
 setOtaState('Connect an ESP32-S3 and select a compiled firmware.bin.', 'neutral', 'Ready');
+renderIdentity();
 selectTransport(selectedTransport);
 log('Dashboard ready. No device action is considered successful without an ESP32 acknowledgment.');
+if (globalThis.AtechBuilder) {
+  builder = AtechBuilder.mount({demo: 1, transport: window.AtechDemo1Transport, log});
+} else {
+  log('AI builder module did not load; serve this page from the builder backend (cd builder && npm start).', 'BROWSER', 'warn');
+}

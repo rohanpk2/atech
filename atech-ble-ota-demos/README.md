@@ -1,6 +1,18 @@
 # Atech ESP32-S3: Bluetooth OTA with Wi-Fi browser fallback
 
-**Status:** both demos provide their original Bluetooth OTA path plus an independent, device-hosted Wi-Fi SoftAP portal in the `base` and `updated` images. **No BLE or Wi-Fi transfer has been verified on physical ESP32-S3 hardware in this environment.** Successful compilation and browser unit tests are not hardware results; use [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) for the required matrix.
+**Status:** both demos provide their original Bluetooth OTA path plus an independent, device-hosted Wi-Fi SoftAP portal in the `base` and `updated` images, and now an **AI firmware builder**: type a prompt in either dashboard, the backend generates a sandboxed C++ app with Claude, compiles it with PlatformIO, validates the image, and deploys it over that demo's BLE OTA protocol after you review the code. See [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md). **No BLE or Wi-Fi transfer has been verified on physical ESP32-S3 hardware in this environment.** Successful compilation, browser unit tests and backend end-to-end generation are not hardware results; use [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) for the required matrix.
+
+## AI firmware builder (both demos)
+
+```sh
+cd ~/Projects/atech/atech-ble-ota-demos/builder
+npm install
+npm start
+```
+
+Open **http://localhost:5173/demo1/** or **http://localhost:5173/demo2/** in desktop Chrome (stop any old `python3 -m http.server 5173` first; the backend now serves both dashboards). Connect the board, type for example "Make the onboard LED blink three times quickly, pause for two seconds, and repeat.", click **Build firmware**, read the generated `user_app.cpp`, then click **Deploy to device**. The dashboard verifies the device ID, the new build id, that the generated app loop is executing, and an echo before confirming the image; the board rolls back automatically if a generated app crashes before confirmation. Model access uses `ANTHROPIC_API_KEY` (or `ant auth login`) when present, otherwise the logged-in `claude` CLI.
+
+The builder also adds to every image: a unique device ID and pairing code (`ATECH-<MAC>`, last six hex digits in the BLE name and Wi-Fi SSID), an identity GATT service, a sandboxed app task that the stock blue/green blink now runs on, guarded GPIO, rollback confirmation and a crash-counting safe mode. A one-time USB installer with ESP Web Tools lives at `/demo1/install.html` and `/demo2/install.html` (Chrome/Edge desktop).
 
 **User experience:** use Bluetooth OTA from the existing Chrome interfaces when Web Bluetooth is available. As a fallback, hold the running board's **BOOT** button for about three seconds, join its WPA2 `Atech-OTA-D1-<suffix>` or `Atech-OTA-D2-<suffix>` hotspot, and upload the application `firmware.bin` from Safari or Chrome at **http://192.168.4.1/**. Both transports stream into the inactive OTA application partition, reboot, and retain both update methods.
 
@@ -18,9 +30,12 @@ These are implementation families rather than five mutually exclusive radio tech
 
 ## Folder guide
 
-- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It provides safe LED/status commands, matched ESP32 acknowledgments, random-nonce connection proofs, and a real OTA path. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write.
-- `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag; use its maintained Web Bluetooth dashboard at https://gb88.github.io/BLEOTA/ . It handles 4KB sectors, CRC16, retries, and optional signing (the example leaves signing disabled).
-- `shared/AtechWifiOta/`: shared SoftAP, authenticated local portal, streaming IDF OTA writer, validation, timeout, and post-reboot verification support used by all four firmware builds.
+- `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It provides safe LED/status commands, matched ESP32 acknowledgments, random-nonce connection proofs, and a real OTA path. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write. `src/app/user_app.cpp` holds the stock blink app the AI builder replaces.
+- `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag. Its new `web/` dashboard speaks the gb88 protocol from an independent client (`bleota-client.js`) and adds identity, verification and the AI builder; gb88's maintained page at https://gb88.github.io/BLEOTA/ still works against the same firmware. The protocol handles 4KB sectors, CRC16, retries, and optional signing (left disabled).
+- `shared/AtechCore/`: the protected firmware core used by both demos: device ID and pairing code, identity GATT service, sandboxed app task, LED and GPIO guards, rollback confirmation and safe mode. Generated code only sees `AtechApp.h`.
+- `shared/AtechWifiOta/`: shared SoftAP, authenticated local portal, streaming IDF OTA writer, validation, timeout, and post-reboot verification support used by all firmware builds.
+- `builder/`: the Node backend of the AI firmware builder (model access, policy, isolated PlatformIO workspaces, image validation, job API, ESP Web Tools installer) that also serves both dashboards. `web-shared/` holds the builder card and identity protocol used by both.
+- `AI_FIRMWARE_BUILDER.md`: how the builder works, what generated code may do, the identity and recovery protocol, and what has and has not been physically verified.
 - `WIFI_OTA_TESTING.md`: exact USB, BLE, macOS/iPhone Safari, Chrome, interruption, rejection, and recovery procedures.
 
 **One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` can run over Bluetooth or Wi-Fi. To change between demos, USB-flash the other demo baseline.
@@ -59,10 +74,10 @@ pio device monitor -b 115200
 ```sh
 cd ~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt
 pio run -e updated
-python3 -m http.server 5173 --directory web
+cd ../builder && npm install && npm start
 ```
 
-Keep that terminal open, then open **http://localhost:5173** in desktop Chrome. The update image is:
+Keep that terminal open, then open **http://localhost:5173/demo1/** in desktop Chrome (the builder backend serves the dashboard; a plain static server no longer works because the AI card needs `/api/*` and `/shared/*`). The update image is:
 
 ```text
 ~/Projects/atech/atech-ble-ota-demos/demo1-custom-gatt/.pio/build/updated/firmware.bin
@@ -74,10 +89,10 @@ The dashboard now checks `navigator.bluetooth`: Bluetooth is preferred when avai
 ### 3. Prove two-way BLE communication
 
 1. Unplug the board from the Mac and power it from a wall adapter or power bank.
-2. Click **Connect device** and choose `Atech-Custom-OTA`.
+2. Click **Connect device** and choose `Atech-Custom-OTA-<pairing code>`; the code is the last six hex digits of the device ID shown in the device card after connecting.
 3. Click **Run BLE connection test**. A pass means the firmware echoed the dashboard's exact random 64-bit challenge; a completed browser write alone never passes the test.
 4. Enter `blink green` and click **Send command**. Confirm both the physical LED change and the **ESP32 ACK** card with the matching request ID, firmware version, state, and latency.
-5. Try `blink blue`, `stop blinking`, `get status`, or `ping`. All other text is rejected in the browser, and firmware only accepts the five corresponding opcodes.
+5. Try `blink blue`, `stop blinking`, `get status`, `ping`, or `resume app` (hands the LED back to the running app). All other text is rejected in the browser, and firmware only accepts the six corresponding opcodes.
 
 ### 4. Perform and verify the real BLE OTA
 
@@ -101,15 +116,18 @@ Command requests and responses are fixed at 20 bytes so they fit the minimum BLE
 | `0x03` | `blink green` | Blink the onboard LED green |
 | `0x04` | `stop blinking` | Turn the onboard LED off |
 | `0x05` | `get status` | Report state without changing it |
+| `0x06` | `resume app` | Return LED control to the running (generated or stock) app |
+
+LED mode `3` in the acknowledgment means "app controlled". The shared identity service (`a7ec0100`) with its confirm/rollback/echo/restart control channel is documented in [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md).
 
 ## Demo 2: existing BLE OTA implementation / browser
 
 1. Open `demo2-bleota-library` in Cursor.
 2. Run `pio run -e base -t upload` (BOOT/RST if required), then press RST if needed.
 3. Run `pio run -e updated` to compile `.pio/build/updated/firmware.bin` (**do not USB-upload the updated version**).
-4. On Mac Chrome visit https://gb88.github.io/BLEOTA/ , click Connect and choose `Atech-Library-OTA`.
+4. Either open **http://localhost:5173/demo2/** (builder backend running) and use its manual firmware card or the AI builder, or on Mac Chrome visit https://gb88.github.io/BLEOTA/ , click Connect and choose `Atech-Library-OTA-<pairing code>`.
 5. Select `.pio/build/updated/firmware.bin`, select **FLASH** / application firmware, start OTA.
-6. Wait for completion and reboot. Reconnect: FW version should read `demo2-2.0.0`, LED should blink GREEN quickly.
+6. Wait for completion and reboot. Reconnect: FW version should read `demo2-2.0.0`, LED should blink GREEN quickly. The Atech dashboard additionally verifies the device ID and build id through the identity service.
 
 This browser uploader and library are by gb88 (not included or copied in this package). **AGPL-3.0**: assess redistribution/network-service implications with counsel before embedding in a proprietary Atech product. The gb88 protocol is unchanged. Its optional firmware signing remains disabled in this demo; the independent Wi-Fi fallback does not alter that BLE security choice.
 
@@ -154,14 +172,23 @@ These checks do not replace a physical transfer, but they verify the toolchain, 
 
 ```sh
 cd demo1-custom-gatt
-pio run -e base && pio run -e updated
+pio run -e base && pio run -e updated && pio run -e ai
 node web/protocol.test.js
 node web/dashboard.test.js
 node ../shared/AtechWifiOta/portal.test.js
+node ../shared/AtechCore/core.test.js
 
 cd ../demo2-bleota-library
-pio run -e base && pio run -e updated
+pio run -e base && pio run -e updated && pio run -e ai
+node firmware.test.js
+node web/bleota-client.test.js
+node web/dashboard.test.js
+
+cd ../web-shared && node atech-identity.test.js && node atech-builder.test.js
+cd ../builder && npm test
 ```
+
+The `ai` environment is the one the builder compiles inside its isolated workspace; it is never uploaded over USB.
 
 The projects are pinned to PlatformIO Espressif32 8.0.0 / Arduino-ESP32 3.3.12. PlatformIO labels the underlying board definition as N8/no-PSRAM, but the project overrides select the N16R8 settings: `qio_opi`, `BOARD_HAS_PSRAM`, a 16MB flash header, and the custom 16MB partition table.
 

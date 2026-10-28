@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Atech USB Installer (Demo 2)</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/shared/builder.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Atech <span>USB installer, Demo 2</span></div>
+    <div class="topbar-actions">
+      <a class="btn secondary" href="./">Back to the dashboard</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="card" aria-labelledby="install-heading">
+      <div class="card-head">
+        <h2 id="install-heading">One-time USB install of the Demo 2 baseline</h2>
+        <span id="installerBadge" class="badge neutral">Checking</span>
+      </div>
+      <p class="note">Writes the bootloader, partition table, OTA selector and the Demo 2 base firmware over USB with ESP Web Tools (Web Serial). This works in desktop Chrome and Edge only. Safari and Firefox have no Web Serial; on those browsers use the PlatformIO command below instead. After this one-time install, every later update travels over Bluetooth or Wi-Fi.</p>
+      <ol class="steps">
+        <li>Keep the builder backend running; it serves this page and the four image parts from the Demo 2 <code>base</code> build.</li>
+        <li>Connect the ESP32-S3 DevKitC-1 with a data-capable USB-C cable. If no serial port shows up in the picker, hold <strong>BOOT</strong>, tap <strong>RST</strong>, release <strong>BOOT</strong>, then try again.</li>
+        <li>Click the install button, pick the board's serial port, and allow the full erase when asked. The install replaces everything on the flash, including NVS, so the board generates new Wi-Fi OTA credentials.</li>
+        <li>When it finishes, open <strong>Logs &amp; Console</strong> in the same dialog and press <strong>RST</strong>. The boot log prints the device ID, pairing code, Wi-Fi hotspot name, WPA2 password and portal token. Record them now.</li>
+        <li>Return to the dashboard and connect over Bluetooth. The board advertises as <code>Atech-Library-OTA-&lt;pairing code&gt;</code>.</li>
+      </ol>
+      <p id="installerStatus" class="state neutral" aria-live="polite">Checking whether the base image parts are available.</p>
+      <div class="ai-deploy-row">
+        <esp-web-install-button manifest="/api/installer/2/manifest.json" id="installButton">
+          <button slot="activate" class="btn primary" type="button">Install Demo 2 baseline over USB</button>
+          <span slot="unsupported" class="state error">This browser has no Web Serial. Use desktop Chrome or Edge, or run the PlatformIO command below.</span>
+          <span slot="not-allowed" class="state error">Web Serial needs a secure page. Open this page at http://localhost:5173/demo2/install.html.</span>
+        </esp-web-install-button>
+        <button id="buildBase" class="btn secondary" type="button">Build the base image now</button>
+      </div>
+      <p class="note" style="margin-top:16px">Command-line equivalent (any browser, any OS):</p>
+      <pre class="ai-code">cd demo2-bleota-library
+pio run -e base -t upload
+pio device monitor -b 115200</pre>
+    </section>
+  </main>
+
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <script>
+    'use strict';
+    (function () {
+      const $ = id => document.getElementById(id);
+      function setStatus(text, tone, badge) {
+        $('installerStatus').textContent = text;
+        $('installerStatus').className = `state ${tone}`;
+        $('installerBadge').textContent = badge;
+        $('installerBadge').className = `badge ${tone}`;
+      }
+      async function refresh() {
+        try {
+          const response = await fetch('/api/installer/2/status', {cache: 'no-store'});
+          const status = await response.json();
+          if (status.ready && !status.stale) {
+            setStatus('Base image parts are ready. Chrome or Edge on this computer can install them over USB.', 'success', 'Ready');
+          } else if (status.ready) {
+            setStatus('Base image parts exist but the firmware sources changed since. Rebuild before installing.', 'working', 'Stale');
+          } else {
+            setStatus('The base image has not been built yet. Click "Build the base image now" first.', 'error', 'Not built');
+          }
+        } catch (error) {
+          setStatus('The builder backend is not reachable. Start it with: cd builder && npm start', 'error', 'Offline');
+        }
+      }
+      $('buildBase').addEventListener('click', async () => {
+        $('buildBase').disabled = true;
+        setStatus('Building the Demo 2 base image with PlatformIO. This can take a few minutes the first time.', 'working', 'Building');
+        try {
+          const response = await fetch('/api/installer/2/build', {method: 'POST'});
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          await refresh();
+        } catch (error) {
+          setStatus(`Build failed: ${error.message}`, 'error', 'Failed');
+        } finally {
+          $('buildBase').disabled = false;
+        }
+      });
+      refresh();
+    })();
+  </script>
+</body>
+</html>

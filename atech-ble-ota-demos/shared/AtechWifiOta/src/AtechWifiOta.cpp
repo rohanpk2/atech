@@ -7,6 +7,7 @@
 #include <esp_app_desc.h>
 #include <esp_app_format.h>
 #include <esp_err.h>
+#include <esp_mac.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
@@ -890,10 +891,12 @@ bool AtechWifiOtaPortal::begin(const AtechWifiOtaConfig &config) {
   }
   if (_impl->config.rebootDelayMs < 1000) _impl->config.rebootDelayMs = 2200;
 
-  const uint64_t mac = ESP.getEfuseMac();
+  // The last three MAC bytes are device-unique; the first three are the
+  // Espressif OUI shared by every chip from the same batch.
+  uint8_t mac[6] = {};
+  esp_efuse_mac_get_default(mac);
   char suffix[7];
-  snprintf(suffix, sizeof(suffix), "%06llX",
-           static_cast<unsigned long long>(mac & 0xFFFFFFULL));
+  snprintf(suffix, sizeof(suffix), "%02X%02X%02X", mac[3], mac[4], mac[5]);
   _impl->apSsid = _impl->ssidPrefix + "-" + suffix;
   if (!_impl->loadCredentials()) {
     Serial.printf("Wi-Fi OTA disabled: %s\n", _impl->error.c_str());

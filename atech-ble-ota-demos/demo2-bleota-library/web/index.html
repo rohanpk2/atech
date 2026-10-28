@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Atech Device Console (Demo 2)</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/shared/builder.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Atech <span>Device console, Demo 2 (gb88 BLEOTA transport)</span></div>
+    <div class="topbar-actions">
+      <div id="globalConnection" class="status offline">
+        <i aria-hidden="true"></i>
+        <span id="globalConnectionText">Disconnected</span>
+      </div>
+      <a class="btn text" href="install.html">USB install</a>
+      <button id="connect" class="btn primary" type="button">Connect</button>
+      <button id="disconnect" class="btn secondary" type="button" disabled>Disconnect</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <div id="compatibility" class="banner" role="alert" hidden></div>
+
+    <div class="segmented" role="group" aria-label="Update method">
+      <button id="useBluetooth" type="button" aria-pressed="false">Bluetooth</button>
+      <button id="useWifi" type="button" aria-pressed="false">Wi-Fi</button>
+    </div>
+
+    <section id="wifiTransportPanel" class="card" aria-labelledby="wifi-heading" hidden>
+      <div class="card-head">
+        <h2 id="wifi-heading">Update over Wi-Fi</h2>
+        <a class="btn primary" href="http://192.168.4.1" target="_blank" rel="noreferrer">Open 192.168.4.1</a>
+      </div>
+      <p class="note">This dashboard does not fetch or upload to the device. Disconnect any active Bluetooth session, join the board's hotspot, and finish the upload on its local page. Build with the AI card first and use its Download button to get the firmware.bin.</p>
+      <ol class="steps">
+        <li>With the firmware running, hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it. Do not press RST.</li>
+        <li>Join <code>Atech-OTA-D2-&lt;suffix&gt;</code> in Wi-Fi settings. The suffix is the board's pairing code; the WPA2 password and portal token come from the 115200-baud serial output or the deployment record. Stay connected if the phone warns that the network has no Internet.</li>
+        <li>Open <code>http://192.168.4.1</code> in Safari or Chrome and enter the portal token.</li>
+        <li>Select the application <code>firmware.bin</code>, not a bootloader, partitions, or merged image, then tap Deploy Firmware.</li>
+        <li>Wait for verified success and reboot. Rejoin the hotspot if prompted to see the new version. Wi-Fi mode times out and Bluetooth resumes.</li>
+      </ol>
+    </section>
+
+    <div id="bleConsole">
+      <section class="card device" aria-labelledby="deviceName">
+        <h2 id="deviceName">No device connected</h2>
+        <dl class="stats">
+          <div><dt>Firmware</dt><dd id="firmwareVersion" class="mono">Unknown</dd></div>
+          <div><dt>Last acknowledgment</dt><dd id="lastSeen">Never</dd></div>
+          <div><dt>Heartbeat</dt><dd id="signalState" class="signal offline">None</dd></div>
+          <div><dt>Device ID</dt><dd id="deviceId" class="mono">Unknown</dd></div>
+          <div><dt>Pairing code</dt><dd id="pairingCode" class="mono">Unknown</dd></div>
+          <div><dt>App</dt><dd id="appInfo">Unknown</dd></div>
+        </dl>
+      </section>
+
+      <section class="card ai-card" aria-labelledby="ai-heading" style="margin-top:16px">
+        <div class="card-head">
+          <div>
+            <h2 id="ai-heading">AI firmware builder</h2>
+            <span id="aiBackend" class="ai-backend">Checking the builder backend</span>
+          </div>
+          <span id="aiBadge" class="badge neutral">Idle</span>
+        </div>
+        <p class="note">Describe what the board should do. The backend asks the model for a sandboxed C++ app, compiles it with PlatformIO in an isolated workspace, validates the image against this board, and shows the code here for review. Nothing reaches the board until you click Deploy; deployment uses the gb88 BLEOTA sector protocol.</p>
+        <textarea id="aiPrompt" class="ai-prompt" rows="3" spellcheck="false"
+                  placeholder="Make the onboard LED blink three times quickly, pause for two seconds, and repeat."></textarea>
+        <div id="aiExamples" class="ai-examples" aria-label="Example prompts"></div>
+        <div class="ai-actions">
+          <button id="aiBuild" class="btn primary" type="button" disabled>Build firmware</button>
+          <span id="aiAttempts" class="ai-attempts"></span>
+        </div>
+        <p id="aiStatus" class="state neutral" aria-live="polite"></p>
+        <div id="aiProgress" class="progress ai-progress" role="progressbar" aria-label="Build progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="aiProgressBar"></div>
+        </div>
+        <div id="aiLog" class="ai-diags" hidden></div>
+        <p id="aiBrowserNote" class="ai-note" hidden></p>
+        <div id="aiReview" class="ai-review" hidden>
+          <h3>Generated application (src/app/user_app.cpp)</h3>
+          <p id="aiSummary" class="ai-summary"></p>
+          <small id="aiCodeMeta" class="ai-code-meta"></small>
+          <pre id="aiCode" class="ai-code" tabindex="0"></pre>
+        </div>
+        <p id="aiTarget" class="ai-target"></p>
+        <div class="ai-deploy-row">
+          <button id="aiDeploy" class="btn primary" type="button" disabled>Deploy to device</button>
+          <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware.bin</a>
+        </div>
+        <div class="ai-recovery">
+          <button id="aiConfirm" class="btn secondary" type="button" hidden>Confirm this boot (cancel rollback)</button>
+          <button id="aiRollback" class="btn secondary" type="button" hidden>Roll back to previous firmware</button>
+        </div>
+      </section>
+
+      <div class="grid">
+        <section class="card" aria-labelledby="test-heading">
+          <div class="card-head"><h2 id="test-heading">Connection test</h2></div>
+          <p class="note">Writes a random challenge to the Atech core control characteristic and requires the board to echo it back. The gb88 OTA characteristics are not touched.</p>
+          <dl class="kv stack" aria-live="polite">
+            <div><dt>Challenge</dt><dd id="challengeValue" class="mono">Not sent</dd></div>
+            <div><dt>Result</dt><dd id="testResult" class="test-result neutral">Not run</dd></div>
+            <div><dt>Latency</dt><dd id="testLatency">None</dd></div>
+            <div><dt>Passed</dt><dd id="testCount">0 / 0</dd></div>
+          </dl>
+          <button id="testConnection" class="btn primary full" type="button" disabled>Run connection test</button>
+        </section>
+
+        <section class="card" aria-labelledby="protocol-heading">
+          <div class="card-head"><h2 id="protocol-heading">Transport</h2></div>
+          <p class="note">Firmware travels with the gb88/BLEOTA 1.0.6 protocol: a 20-byte START command, 4 KB sectors with CRC-16/CCITT acknowledgments, then STOP. gb88's own page at <a href="https://gb88.github.io/BLEOTA/" target="_blank" rel="noreferrer">gb88.github.io/BLEOTA</a> still works with this firmware; this dashboard adds device identity, post-reboot verification and the AI builder on top of the unchanged protocol.</p>
+          <p class="note">Firmware signing stays disabled in this demo, as upstream ships it. The library is AGPL-3.0; review licensing before product use.</p>
+        </section>
+
+        <section class="card span" aria-labelledby="ota-heading">
+          <div class="card-head">
+            <h2 id="ota-heading">Firmware update (manual file)</h2>
+            <span id="otaBadge" class="badge neutral">Ready</span>
+          </div>
+          <p class="note">Advanced: deploy a compiled firmware.bin by hand. The normal flow is the AI builder card above, which never needs a file.</p>
+          <div class="ota-controls">
+            <label class="file" for="bin">
+              <input type="file" accept=".bin,application/octet-stream" id="bin">
+              <span class="file-text">
+                <strong id="fileName">Choose firmware.bin</strong>
+                <small id="fileMeta">ESP32-S3 application image, up to 6 MiB</small>
+              </span>
+              <span class="file-cta">Browse</span>
+            </label>
+            <select id="chunk" aria-label="Bluetooth payload size">
+              <option value="241">241-byte payload</option>
+              <option value="509">509-byte payload</option>
+              <option value="117">117-byte payload</option>
+              <option value="17">17-byte payload</option>
+            </select>
+            <button id="deploy" class="btn primary" type="button" disabled>Deploy</button>
+          </div>
+          <p id="otaState" class="state neutral" aria-live="polite">Connect an ESP32-S3 and select a compiled firmware.bin.</p>
+          <div class="progress" role="progressbar" aria-label="Firmware upload progress"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="bar"></div>
+          </div>
+          <div class="progress-meta">
+            <strong id="progressPercent">0%</strong>
+            <span id="progressBytes">0 B transferred</span>
+            <span id="progressSpeed">0.0 KiB/s</span>
+          </div>
+        </section>
+
+        <section class="card span" aria-labelledby="log-heading">
+          <div class="card-head">
+            <h2 id="log-heading">Activity</h2>
+            <button id="clearLog" class="btn text" type="button">Clear</button>
+          </div>
+          <div id="log" class="log" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script src="/shared/atech-identity.js"></script>
+  <script src="/shared/atech-builder.js"></script>
+  <script src="bleota-client.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

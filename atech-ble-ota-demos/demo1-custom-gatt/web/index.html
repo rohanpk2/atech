@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>Atech Device Console</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2">
+  <link rel="stylesheet" href="/shared/builder.css">
 </head>
 <body>
   <header class="topbar">
@@ -15,6 +16,7 @@
         <i aria-hidden="true"></i>
         <span id="globalConnectionText">Disconnected</span>
       </div>
+      <a class="btn text" href="install.html">USB install</a>
       <button id="connect" class="btn primary" type="button">Connect</button>
       <button id="disconnect" class="btn secondary" type="button" disabled>Disconnect</button>
     </div>
@@ -50,7 +52,50 @@
           <div><dt>Firmware</dt><dd id="firmwareVersion" class="mono">Unknown</dd></div>
           <div><dt>Last acknowledgment</dt><dd id="lastSeen">Never</dd></div>
           <div><dt>Heartbeat</dt><dd id="signalState" class="signal offline">None</dd></div>
+          <div><dt>Device ID</dt><dd id="deviceId" class="mono">Unknown</dd></div>
+          <div><dt>Pairing code</dt><dd id="pairingCode" class="mono">Unknown</dd></div>
+          <div><dt>App</dt><dd id="appInfo">Unknown</dd></div>
         </dl>
+      </section>
+
+      <section class="card ai-card" aria-labelledby="ai-heading" style="margin-top:16px">
+        <div class="card-head">
+          <div>
+            <h2 id="ai-heading">AI firmware builder</h2>
+            <span id="aiBackend" class="ai-backend">Checking the builder backend</span>
+          </div>
+          <span id="aiBadge" class="badge neutral">Idle</span>
+        </div>
+        <p class="note">Describe what the board should do. The backend asks the model for a sandboxed C++ app, compiles it with PlatformIO in an isolated workspace, validates the image against this board, and shows the code here for review. Nothing reaches the board until you click Deploy.</p>
+        <textarea id="aiPrompt" class="ai-prompt" rows="3" spellcheck="false"
+                  placeholder="Make the onboard LED blink three times quickly, pause for two seconds, and repeat."></textarea>
+        <div id="aiExamples" class="ai-examples" aria-label="Example prompts"></div>
+        <div class="ai-actions">
+          <button id="aiBuild" class="btn primary" type="button" disabled>Build firmware</button>
+          <span id="aiAttempts" class="ai-attempts"></span>
+        </div>
+        <p id="aiStatus" class="state neutral" aria-live="polite"></p>
+        <div id="aiProgress" class="progress ai-progress" role="progressbar" aria-label="Build progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="aiProgressBar"></div>
+        </div>
+        <div id="aiLog" class="ai-diags" hidden></div>
+        <p id="aiBrowserNote" class="ai-note" hidden></p>
+        <div id="aiReview" class="ai-review" hidden>
+          <h3>Generated application (src/app/user_app.cpp)</h3>
+          <p id="aiSummary" class="ai-summary"></p>
+          <small id="aiCodeMeta" class="ai-code-meta"></small>
+          <pre id="aiCode" class="ai-code" tabindex="0"></pre>
+        </div>
+        <p id="aiTarget" class="ai-target"></p>
+        <div class="ai-deploy-row">
+          <button id="aiDeploy" class="btn primary" type="button" disabled>Deploy to device</button>
+          <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware.bin</a>
+        </div>
+        <div class="ai-recovery">
+          <button id="aiConfirm" class="btn secondary" type="button" hidden>Confirm this boot (cancel rollback)</button>
+          <button id="aiRollback" class="btn secondary" type="button" hidden>Roll back to previous firmware</button>
+        </div>
       </section>
 
       <div class="grid">
@@ -65,6 +110,7 @@
               <option value="stop blinking"></option>
               <option value="get status"></option>
               <option value="ping"></option>
+              <option value="resume app"></option>
             </datalist>
             <button id="sendCommand" class="btn primary" type="button" disabled>Send</button>
           </div>
@@ -73,6 +119,7 @@
             <button class="chip" type="button" data-command="blink green" disabled>Blink green</button>
             <button class="chip" type="button" data-command="stop blinking" disabled>Stop</button>
             <button class="chip" type="button" data-command="get status" disabled>Get status</button>
+            <button class="chip" type="button" data-command="resume app" disabled>Resume app</button>
           </div>
           <div id="commandResult" class="result idle" aria-live="polite">
             <strong id="commandResultTitle">No command sent</strong>
@@ -141,7 +188,9 @@
     </div>
   </main>
 
-  <script src="protocol.js"></script>
-  <script src="app.js"></script>
+  <script src="/shared/atech-identity.js"></script>
+  <script src="/shared/atech-builder.js"></script>
+  <script src="protocol.js?v=2"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

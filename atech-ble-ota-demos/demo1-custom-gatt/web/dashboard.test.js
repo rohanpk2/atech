@@ -18,9 +18,9 @@ const referencedIds = new Set([...app.matchAll(/\$\('([^']+)'\)/g)].map(match =>
 const missingIds = [...referencedIds].filter(id => !htmlIds.has(id));
 assert.deepEqual(missingIds, [], 'Every DOM ID referenced by app.js must exist in index.html');
 
-assert.match(html, /<script src="protocol\.js"><\/script>\s*<script src="app\.js"><\/script>/,
+assert.match(html, /<script src="protocol\.js(\?v=\d+)?"><\/script>\s*<script src="app\.js(\?v=\d+)?"><\/script>/,
   'protocol.js must load before app.js');
-assert.match(html, /<link rel="stylesheet" href="styles\.css">/);
+assert.match(html, /<link rel="stylesheet" href="styles\.css(\?v=\d+)?">/);
 assert.match(styles, /@media \(max-width:/, 'dashboard must include a responsive layout');
 assert.match(styles, /prefers-reduced-motion/, 'dashboard must respect reduced-motion preferences');
 assert.doesNotMatch(html + app + styles, /\u2014/, 'dashboard copy must not contain em dashes');
@@ -56,5 +56,34 @@ assert.match(app, /\$\('useWifi'\)\.disabled = transferring/,
   'dashboard must lock transport switching during BLE transfer');
 assert.doesNotMatch(app, /\bfetch\s*\(|XMLHttpRequest/,
   'hosted dashboard must not upload to the HTTP device portal');
+
+// AI firmware builder integration
+const BUILDER_IDS = ['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSummary', 'aiCode', 'aiCodeMeta', 'aiDeploy',
+  'aiDownload', 'aiTarget', 'aiConfirm', 'aiRollback', 'aiAttempts', 'aiLog', 'aiBackend', 'aiBrowserNote',
+  'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples'];
+for (const id of BUILDER_IDS) assert.ok(htmlIds.has(id), `builder card must include #${id}`);
+assert.match(html, /<link rel="stylesheet" href="\/shared\/builder\.css(\?v=\d+)?">/,
+  'builder stylesheet must be linked from the shared backend path');
+assert.ok(html.indexOf('/shared/atech-identity.js') < html.indexOf('src="protocol.js'),
+  'identity protocol must load before the dashboard scripts');
+assert.ok(html.indexOf('/shared/atech-builder.js') < html.indexOf('src="app.js'),
+  'builder UI must load before app.js, which mounts it');
+assert.match(html, /href="install\.html"/, 'dashboard must link to the USB installer page');
+assert.match(app, /a7ec0101-2e47-4dd2-82a4-9c2cf6eaa001/, 'app.js must read the identity characteristic');
+assert.match(app, /AtechIdentity\.parseIdentity\(/);
+assert.match(app, /AtechBuilder\.mount\(/, 'app.js must mount the shared builder card');
+assert.match(app, /async function deployBytes\(/, 'OTA must accept bytes so the builder can deploy without a file');
+assert.match(app, /pendingOtaVerification\.buildId/, 'post-reboot verification must compare the build id when known');
+assert.match(app, /pendingOtaVerification\.deviceIdentity/, 'post-reboot verification must compare the Atech device id');
+assert.match(app, /optionalServices: \[SERVICE, AtechIdentity\.IDENTITY_SERVICE\]/);
+assert.match(app, /window\.AtechDemo1Transport/, 'app.js must expose the transport for the builder');
+
+const installHtml = fs.readFileSync(path.join(__dirname, 'install.html'), 'utf8');
+assert.match(installHtml, /<esp-web-install-button[^>]*manifest="\/api\/installer\/1\/manifest\.json"/);
+assert.match(installHtml, /esp-web-tools@10/);
+assert.match(installHtml, /Chrome/);
+assert.match(installHtml, /Edge/);
+assert.match(installHtml, /Safari/);
+assert.doesNotMatch(installHtml, /\u2014/);
 
 console.log('Dashboard structure and verification-flow tests passed');

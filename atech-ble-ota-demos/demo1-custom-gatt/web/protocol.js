@@ -13,11 +13,12 @@
     'blink green': 0x03,
     'stop blinking': 0x04,
     'get status': 0x05,
+    'resume app': 0x06,
   });
   const COMMAND_NAMES = Object.freeze(Object.fromEntries(
     Object.entries(COMMANDS).map(([name, opcode]) => [opcode, name])
   ));
-  const LED_MODES = Object.freeze({0: 'stopped', 1: 'blinking blue', 2: 'blinking green'});
+  const LED_MODES = Object.freeze({0: 'stopped', 1: 'blinking blue', 2: 'blinking green', 3: 'app controlled'});
   const RESPONSE_STATUSES = Object.freeze({
     0: 'executed',
     1: 'malformed request',
