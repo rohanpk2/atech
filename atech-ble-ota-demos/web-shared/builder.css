@@ -63,3 +63,62 @@
 @media (prefers-reduced-motion: reduce) {
   .ai-card .progress div { transition-duration: .01ms !important; }
 }
+
+/* ---- Device panel and deployment panel (Wi-Fi primary, Bluetooth backup) ---- */
+.device-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; }
+.device-panel .device-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.device-panel h2 { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 24px; margin-top: 12px; }
+.device-facts div { min-width: 0; }
+.device-facts dd { white-space: normal; overflow-wrap: anywhere; }
+.device-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.device-list { display: grid; gap: 8px; margin-top: 12px; }
+.device-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); font-size: 13px; }
+.device-row .mono { font-size: 12px; }
+.device-row .spacer { flex: 1; }
+.device-row.selected { border-color: var(--blue); background: var(--blue-soft); }
+.device-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
+.device-form input[type="text"], .device-form input[type="password"] {
+  height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); font-size: 13px; min-width: 0;
+}
+.device-form input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-ring); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); flex: 0 0 auto; }
+.dot.online { background: var(--green); }
+.dot.offline { background: var(--red); }
+.dot.unknown { background: var(--amber); }
+
+.methods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 0 14px; }
+.method {
+  display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface);
+  text-align: left; cursor: pointer; font: inherit; color: var(--text);
+}
+.method strong { font-size: 13px; font-weight: 600; }
+.method small { color: var(--muted); font-size: 12px; }
+.method .tag { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--blue-soft); color: var(--blue); }
+.method.available { border-color: var(--green-line); }
+.method.selected { border-color: var(--blue); background: var(--blue-soft); box-shadow: 0 0 0 1px var(--blue); }
+.method.unavailable { opacity: .55; }
+.method:disabled { cursor: not-allowed; }
+.deploy-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px 20px; margin-top: 10px; }
+.deploy-stats dd { white-space: normal; }
+.deploy-phase { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.deploy-phase span { padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.deploy-phase span.active { border-color: var(--blue-line); background: var(--blue-soft); color: var(--blue); }
+.deploy-phase span.done { border-color: var(--green-line); background: var(--green-soft); color: var(--green-text); }
+.deploy-phase span.failed { border-color: var(--red-line); background: var(--red-soft); color: var(--red-text); }
+.deploy-checks { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+.deploy-checks li { margin: 2px 0; }
+.deploy-main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+.deploy-main .btn.primary { height: 40px; padding: 0 22px; font-size: 14px; }
+.advanced { margin-top: 16px; }
+.advanced > summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 8px 0; }
+.advanced > summary:hover { color: var(--blue); }
+.hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.key-banner { margin-bottom: 16px; padding: 10px 14px; border: 1px solid var(--amber); border-radius: var(--radius-sm); background: #fffbeb; color: var(--amber-text); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .device-panel { grid-template-columns: 1fr; }
+  .device-actions { justify-content: flex-start; }
+  .methods { grid-template-columns: 1fr; }
+  .device-form { grid-template-columns: 1fr; }
+}

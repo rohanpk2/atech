@@ -39,6 +39,12 @@ enum class LedOwner : uint8_t { Off = 0, BlinkBlue = 1, BlinkGreen = 2, App = 3 
 void setLedOwner(LedOwner owner);
 LedOwner ledOwner();
 
+// Flash ownership shared by every OTA transport (BLE, hotspot portal, LAN).
+// Only one writer may hold it; the owner label is reported in identity JSON.
+bool coreTryAcquireOta(const char *owner);
+void coreReleaseOta(const char *owner);
+const char *coreOtaOwner();   // "" when free
+
 // Identity, verification and recovery
 String identityJson();
 bool confirmBoot();

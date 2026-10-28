@@ -14,9 +14,10 @@ const duplicateIds = [...htmlIds].filter(id =>
 );
 assert.deepEqual(duplicateIds, [], 'HTML IDs must be unique');
 
-const referencedIds = new Set([...app.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]));
-const missingIds = [...referencedIds].filter(id => !htmlIds.has(id));
-assert.deepEqual(missingIds, [], 'Every DOM ID referenced by app.js must exist in index.html');
+const shared = fs.readFileSync(path.join(__dirname, '..', '..', 'web-shared', 'atech-builder.js'), 'utf8');
+const referencedIds = new Set([...(app + shared).matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]));
+const missingIds = [...referencedIds].filter(id => !htmlIds.has(id) && !/^method[A-Z]/.test(id));
+assert.deepEqual(missingIds, [], 'Every DOM ID referenced by app.js and the shared module must exist in index.html');
 
 assert.match(html, /<script src="protocol\.js(\?v=\d+)?"><\/script>\s*<script src="app\.js(\?v=\d+)?"><\/script>/,
   'protocol.js must load before app.js');
@@ -38,29 +39,36 @@ assert.match(app, /protocol\.bytesEqual\(response\.nonce, pending\.nonce\)/,
 
 assert.match(app, /Boolean\(navigator\.bluetooth\)/,
   'dashboard must detect Web Bluetooth availability');
-assert.match(app, /bluetoothAvailable \? 'ble' : 'wifi'/,
-  'dashboard must prefer BLE and select Wi-Fi when BLE is unavailable');
+assert.doesNotMatch(app, /selectedTransport|selectTransport\(/,
+  'method selection moved to the shared deployment panel (Wi-Fi first, Bluetooth backup, hotspot last)');
+assert.match(html, /id="methodWifi"[\s\S]*id="methodBle"[\s\S]*id="methodHotspot"/,
+  'deployment panel must list Wi-Fi, Bluetooth and hotspot in priority order');
 assert.match(html, /Atech-OTA-D1-&lt;suffix&gt;/,
-  'Wi-Fi fallback must identify the Demo 1 SoftAP');
+  'hotspot fallback must identify the Demo 1 SoftAP');
 assert.match(html, /http:\/\/192\.168\.4\.1/,
-  'Wi-Fi fallback must point at the device-hosted portal');
+  'hotspot fallback must point at the device-hosted portal');
 assert.match(html, /hold the physical <strong>BOOT<\/strong> button for about 3 seconds/,
-  'Wi-Fi fallback must explain runtime BOOT activation');
+  'hotspot fallback must explain runtime BOOT activation');
 assert.match(html, /This dashboard does not fetch or upload/,
-  'dashboard must hand off Wi-Fi upload to the device portal');
+  'dashboard must hand off hotspot upload to the device portal');
 assert.match(html, /Disconnect any active Bluetooth session/,
-  'Wi-Fi fallback must require BLE disconnection for exclusive OTA ownership');
-assert.match(app, /transport === 'wifi' && isConnected\(\)/,
-  'dashboard must refuse Wi-Fi handoff while BLE remains connected');
-assert.match(app, /\$\('useWifi'\)\.disabled = transferring/,
-  'dashboard must lock transport switching during BLE transfer');
+  'hotspot fallback must require BLE disconnection for exclusive OTA ownership');
+assert.match(html, /Join this network/, 'hotspot steps must cover home Wi-Fi provisioning');
+assert.match(app, /meta\.onProgress/, 'BLE OTA must report progress to the shared deployment panel');
+assert.match(app, /meta\.onPhase/, 'BLE OTA must report phases to the shared deployment panel');
 assert.doesNotMatch(app, /\bfetch\s*\(|XMLHttpRequest/,
-  'hosted dashboard must not upload to the HTTP device portal');
+  'the demo script never talks HTTP; only the shared module talks to the same-origin backend');
 
 // AI firmware builder integration
 const BUILDER_IDS = ['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSummary', 'aiCode', 'aiCodeMeta', 'aiDeploy',
   'aiDownload', 'aiTarget', 'aiConfirm', 'aiRollback', 'aiAttempts', 'aiLog', 'aiBackend', 'aiBrowserNote',
-  'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples'];
+  'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples',
+  // device panel and deployment panel
+  'devDot', 'devBadge', 'devStatus', 'devWifi', 'devIp', 'devBle', 'devFind', 'devForget', 'devList', 'devPairForm',
+  'devPairHost', 'devPairToken', 'devPair', 'devHint', 'keyBanner', 'methodWifi', 'methodBle', 'methodHotspot',
+  'methodWifiNote', 'methodBleNote', 'methodHotspotNote', 'deployStatus', 'deployBadge', 'deployProgress',
+  'deployProgressBar', 'deployTransport', 'deployPercent', 'deployBytes', 'deploySpeed', 'deployEta', 'deployTime',
+  'deployPhases', 'deployChecks', 'deployAbort'];
 for (const id of BUILDER_IDS) assert.ok(htmlIds.has(id), `builder card must include #${id}`);
 assert.match(html, /<link rel="stylesheet" href="\/shared\/builder\.css(\?v=\d+)?">/,
   'builder stylesheet must be linked from the shared backend path');

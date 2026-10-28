@@ -12,12 +12,15 @@ const installHtml = fs.readFileSync(path.join(__dirname, 'install.html'), 'utf8'
 const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
 const duplicateIds = [...htmlIds].filter(id => [...html.matchAll(new RegExp(`\\bid="${id}"`, 'g'))].length !== 1);
 assert.deepEqual(duplicateIds, [], 'HTML IDs must be unique');
-const referencedIds = new Set([...app.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]));
-assert.deepEqual([...referencedIds].filter(id => !htmlIds.has(id)), [], 'Every DOM ID referenced by app.js must exist');
+const shared = fs.readFileSync(path.join(__dirname, '..', '..', 'web-shared', 'atech-builder.js'), 'utf8');
+const referencedIds = new Set([...(app + shared).matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]));
+assert.deepEqual([...referencedIds].filter(id => !htmlIds.has(id) && !/^method[A-Z]/.test(id)), [],
+  'Every DOM ID referenced by app.js and the shared module must exist');
 
 const BUILDER_IDS = ['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSummary', 'aiCode', 'aiCodeMeta', 'aiDeploy',
   'aiDownload', 'aiTarget', 'aiConfirm', 'aiRollback', 'aiAttempts', 'aiLog', 'aiBackend', 'aiBrowserNote',
-  'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples'];
+  'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples', 'devFind', 'devPair', 'devPairHost', 'devPairToken',
+  'methodWifi', 'methodBle', 'methodHotspot', 'deployStatus', 'deployPercent', 'deploySpeed', 'deployEta', 'deployPhases'];
 for (const id of BUILDER_IDS) assert.ok(htmlIds.has(id), `builder card must include #${id}`);
 
 const order = ['/shared/atech-identity.js', '/shared/atech-builder.js', 'src="bleota-client.js', 'src="app.js']
@@ -47,7 +50,9 @@ assert.match(app, /pendingOtaVerification\.buildId/);
 assert.match(app, /window\.AtechDemo2Transport/);
 assert.match(app, /AtechBuilder\.mount\(/);
 assert.match(app, /Boolean\(navigator\.bluetooth\)/);
-assert.match(app, /transport === 'wifi' && isConnected\(\)/, 'must refuse Wi-Fi handoff while BLE remains connected');
+assert.doesNotMatch(app, /selectedTransport|selectTransport\(/, 'method selection lives in the shared deployment panel');
+assert.match(app, /meta\.onProgress/, 'BLEOTA transfer must report progress to the shared deployment panel');
+assert.match(html, /Join this network/, 'hotspot steps must cover home Wi-Fi provisioning');
 assert.doesNotMatch(app, /\bfetch\s*\(|XMLHttpRequest/, 'app.js must not upload to the HTTP device portal');
 
 assert.match(installHtml, /<esp-web-install-button[^>]*manifest="\/api\/installer\/2\/manifest\.json"/);

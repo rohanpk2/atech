@@ -1,0 +1,10 @@
+{
+  "name": "AtechWifiLan",
+  "version": "1.0.0",
+  "description": "Shared station-mode Wi-Fi, mDNS discovery and the authenticated LAN OTA service for the Atech ESP32-S3 demos",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "src"
+  }
+}

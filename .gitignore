@@ -4,3 +4,6 @@
 .env.*
 !.env.example
 .DS_Store
+
+# per-device OTA authorization codes stored by the builder backend; never commit
+atech-ble-ota-demos/.ai-builds/devices.json

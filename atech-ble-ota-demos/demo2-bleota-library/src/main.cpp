@@ -6,6 +6,7 @@
 // untouched; the core only pauses the app while a transfer owns flash.
 #include <Arduino.h>
 #include <AtechCore.h>
+#include <AtechWifiLan.h>
 #include <AtechWifiOta.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -28,6 +29,7 @@
 
 #define LED_PIN 48 // On some ESP32-S3 boards, the RGB LED uses GPIO38 instead.
 constexpr int WIFI_OTA_BUTTON_PIN = 0;  // DevKitC BOOT, sampled only after boot.
+constexpr uint16_t WIFI_LAN_PORT = 8080;  // Authenticated LAN OTA service (mDNS _atech-ota._tcp).
 constexpr uint32_t WIFI_OTA_BUTTON_HOLD_MS = 3000;
 constexpr uint32_t WIFI_OTA_INACTIVITY_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t AUTO_CONFIRM_MS = 20000;
@@ -39,22 +41,35 @@ constexpr char BLE_NAME_PREFIX[] = "Atech-Library-OTA";
 constexpr char FIRMWARE_VERSION[] = "demo2-" ATECH_STR(ATECH_APP_VERSION) ".0.0";
 // Embedded so the backend can prove a firmware.bin belongs to its build job.
 constexpr char BUILD_MARKER[] = "ATECH-BUILD:" ATECH_BUILD_ID;
+// Embedded so a receiving board can refuse an image built for another board.
+constexpr char TARGET_MARKER[] = "ATECH-TARGET:" ATECH_TARGET_DEVICE_ID;
 
 BLEOTAClass BLEOTA;
 BLEServer *server = nullptr;
 AtechWifiOtaPortal wifiOta;
+AtechWifiLan wifiLan;
 volatile bool connected = false;
 volatile bool abortRequested = false;
 bool wasConnected = false;
 bool wifiUploadWasActive = false;
+bool lanTransferWasActive = false;
 String bleDeviceName;
 
 bool otherOtaBusy() {
-  return connected || BLEOTA.isRunning();
+  return connected || BLEOTA.isRunning() || wifiLan.isTransferring();
 }
 
 bool anyOtaBusy() {
+  return BLEOTA.isRunning() || wifiOta.isUpdating() || wifiLan.isTransferring();
+}
+
+// The LAN service may not start while gb88 BLEOTA or the hotspot owns flash.
+bool lanBlockedByOthers() {
   return BLEOTA.isRunning() || wifiOta.isUpdating();
+}
+
+String lanAuthToken() {
+  return wifiOta.otaToken();
 }
 
 void wifiOtaModeChanged(bool active) {
@@ -118,7 +133,7 @@ void setup() {
   coreConfig.buildId = BUILD_MARKER + sizeof("ATECH-BUILD:") - 1; // id after the marker prefix
   coreConfig.appName = ATECH_APP_NAME;
   coreConfig.appVersion = ATECH_APP_VERSION;
-  coreConfig.targetDeviceId = ATECH_TARGET_DEVICE_ID;
+  coreConfig.targetDeviceId = TARGET_MARKER + sizeof("ATECH-TARGET:") - 1; // id after the marker prefix
   coreConfig.ledPin = LED_PIN;
   coreConfig.autoConfirmMs = AUTO_CONFIRM_MS;
   coreConfig.otaBusy = anyOtaBusy;
@@ -143,7 +158,24 @@ void setup() {
   adv->addServiceUUID(BLEOTA.getBLEOTAuuid());
   adv->setScanResponse(true);
 
+  // Station-mode Wi-Fi, mDNS and the authenticated LAN OTA service. Started
+  // before the hotspot portal so the portal can arbitrate the radio mode.
+  AtechWifiLanConfig lanConfig = {};
+  lanConfig.demo = 2;
+  lanConfig.imageIdentity = WIFI_OTA_IMAGE_IDENTITY;
+  lanConfig.preferencesNamespace = "atech_wifi";
+  lanConfig.firmwareVersion = FIRMWARE_VERSION;
+  lanConfig.hostnamePrefix = "atech";
+  lanConfig.port = WIFI_LAN_PORT;
+  lanConfig.rebootDelayMs = 1500;
+  lanConfig.authToken = lanAuthToken;
+  lanConfig.otherOtaBusy = lanBlockedByOthers;
+  if (!wifiLan.begin(lanConfig)) {
+    Serial.printf("Wi-Fi LAN service initialization failed: %s\n", wifiLan.lastError().c_str());
+  }
+
   AtechWifiOtaConfig wifiOtaConfig = {};
+  wifiOtaConfig.lan = &wifiLan;
   wifiOtaConfig.deviceName = bleDeviceName.c_str();
   wifiOtaConfig.firmwareVersion = FIRMWARE_VERSION;
   wifiOtaConfig.ssidPrefix = "Atech-OTA-D2";
@@ -163,12 +195,23 @@ void setup() {
                   wifiOta.lastError().c_str());
   }
   if (!wifiOta.isActive()) BLEDevice::startAdvertising();
-  Serial.printf("Atech BLEOTA library demo ready: %s (%s)\n", FIRMWARE_VERSION, BUILD_MARKER);
+  Serial.printf("Atech BLEOTA library demo ready: %s (%s, %s)\n", FIRMWARE_VERSION, BUILD_MARKER, TARGET_MARKER);
 }
 
 void loop() {
-  // Always service the runtime BOOT-button detector and an active local portal.
+  // Always service the LAN service, the BOOT-button detector and an active portal.
+  wifiLan.loop();
   wifiOta.loop();
+  // A LAN transfer pauses advertising (not a connected client) so the radio
+  // favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
+  const bool lanTransfer = wifiLan.isTransferring();
+  if (lanTransfer != lanTransferWasActive) {
+    lanTransferWasActive = lanTransfer;
+    if (server) {
+      if (lanTransfer) { if (!connected) BLEDevice::stopAdvertising(); }
+      else if (!connected && !wifiOta.isActive()) server->startAdvertising();
+    }
+  }
   // The app pauses only while a Wi-Fi upload is actually streaming into flash.
   const bool wifiUploading = wifiOta.isUpdating();
   if (wifiUploading && !wifiUploadWasActive) atech::coreSuspendApp();
@@ -188,7 +231,7 @@ void loop() {
   // The shared portal owns the inactive partition while Wi-Fi mode is active.
   // Keep gb88's protocol untouched, but do not service or re-advertise it until
   // Wi-Fi exits. A connected/running BLE session prevents Wi-Fi from starting.
-  if (!wifiOta.isActive()) {
+  if (!wifiOta.isActive() && !lanTransfer) {
     BLEOTA.process();
     if (!connected && wasConnected) {
       delay(250);

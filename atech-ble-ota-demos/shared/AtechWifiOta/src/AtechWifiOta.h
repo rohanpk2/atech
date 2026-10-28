@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+class AtechWifiLan;
+
 struct AtechWifiOtaConfig {
   const char *deviceName;
   const char *firmwareVersion;
@@ -19,6 +21,10 @@ struct AtechWifiOtaConfig {
   uint32_t rebootDelayMs;
   bool (*otherOtaBusy)();
   void (*modeChanged)(bool active);
+  // Optional station-mode manager. When set, the portal gains the home Wi-Fi
+  // provisioning card and runs the hotspot in AP+STA mode so the user can
+  // watch the join succeed from the same page.
+  AtechWifiLan *lan;
 };
 
 class AtechWifiOtaPortal {
@@ -40,6 +46,9 @@ public:
   bool isUpdating() const;
   const String &ssid() const;
   const String &lastError() const;
+  // The per-device OTA authorization code; shared with the LAN service as
+  // the HMAC secret. Never exposed by any HTTP endpoint.
+  const String &otaToken() const;
 
 private:
   struct Impl;

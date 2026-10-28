@@ -7,9 +7,13 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const {loadConfig, loadDotEnv} = require('./lib/config');
 const gpio = require('./lib/gpio-policy');
 const {JobStore} = require('./lib/jobs');
+const {DeviceRegistry} = require('./lib/devices');
+const {DeploymentStore} = require('./lib/lan-ota');
+const {createFakeDevice} = require('./lib/fake-device');
 const installerModule = require('./lib/installer');
 const {selectProvider} = require('./lib/generate');
 const {runPio} = require('./lib/pio');
@@ -78,9 +82,30 @@ function lanUrls(port) {
   return urls;
 }
 
-function createServer({config, jobs, installer = installerModule, pioVersion = null}) {
+// Dashboard key check: header, query (EventSource cannot set headers) or the
+// cookie the dashboard sets from a ?key= link. Only enforced when configured.
+function keyPresented(req, url, key) {
+  if (!key) return true;
+  const header = req.headers['x-atech-key'];
+  const query = url.searchParams.get('key');
+  const cookie = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('atech_key='));
+  const cookieValue = cookie ? decodeURIComponent(cookie.slice('atech_key='.length)) : null;
+  const expected = Buffer.from(key);
+  for (const candidate of [header, query, cookieValue]) {
+    if (typeof candidate !== 'string') continue;
+    const buf = Buffer.from(candidate);
+    if (buf.length === expected.length && crypto.timingSafeEqual(buf, expected)) return true;
+  }
+  return false;
+}
+
+function createServer({config, jobs, devices = null, deployments = null, installer = installerModule, pioVersion = null, simulated = []}) {
   const handlers = [];
   const route = (method, pattern, handler) => handlers.push({method, pattern, handler});
+  devices = devices || new DeviceRegistry({config});
+  deployments = deployments || new DeploymentStore({config, jobs, devices});
+  let lastRefreshAt = 0;
+  let refreshPromise = null;
 
   route('GET', /^\/api\/health$/, async (req, res) => {
     sendJson(res, 200, {
@@ -88,7 +113,99 @@ function createServer({config, jobs, installer = installerModule, pioVersion = n
       pio: pioVersion, host: config.host, port: config.port, lanUrls: lanUrls(config.port),
       demos: Object.values(config.demos).map(d => ({demo: d.demo, name: d.name, path: `/${d.key.split('-')[0]}/`})),
       maxRepairs: config.maxRepairs,
+      lan: {chunkBytes: deployments.chunkBytes, devicePort: config.lanPort, simulated: simulated.map(s => ({id: s.state.id, demo: s.state.demo}))},
+      keyRequired: Boolean(config.dashboardKey),
     });
+  });
+
+  // ---- devices: discovery, pairing, status, control ----
+  route('GET', /^\/api\/devices$/, async (req, res, [], url) => {
+    if (url.searchParams.get('refresh') === '1') {
+      // Probe each registered board at most every few seconds; coalesce concurrent requests.
+      if (!refreshPromise && Date.now() - lastRefreshAt > 4000) {
+        refreshPromise = devices.refresh().catch(() => {}).finally(() => { refreshPromise = null; lastRefreshAt = Date.now(); });
+      }
+      if (refreshPromise) await refreshPromise;
+    }
+    sendJson(res, 200, {devices: devices.list(), refreshedAt: lastRefreshAt ? new Date(lastRefreshAt).toISOString() : null});
+  });
+
+  route('POST', /^\/api\/devices\/discover$/, async (req, res) => {
+    try { sendJson(res, 200, {found: await devices.discover({timeoutMs: 1800})}); }
+    catch (error) { sendJson(res, 500, {error: redactSecrets(error.message)}); }
+  });
+
+  route('POST', /^\/api\/devices\/pair$/, async (req, res) => {
+    const body = await readJson(req);
+    try {
+      const device = await devices.pair({host: String(body.host || '').trim(), port: Number(body.port) || config.lanPort,
+                                         token: body.token, name: body.name});
+      sendJson(res, 200, {device});
+    } catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); }
+  });
+
+  route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/probe$/, async (req, res, [id]) => {
+    const body = await readJson(req);
+    const record = devices.get(id);
+    const host = String(body.host || (record && record.host) || '').trim();
+    const port = Number(body.port) || (record && record.port) || config.lanPort;
+    if (!host) { sendJson(res, 400, {error: 'No address known for this device; enter its IP address'}); return; }
+    try {
+      const identity = await devices.probe({host, port, id});
+      if (identity.id !== id) { sendJson(res, 409, {error: `${host}:${port} is ${identity.id}, not ${id}`}); return; }
+      sendJson(res, 200, {device: devices.describe(id) || {id, host, port, identity, paired: false}});
+    } catch (error) { sendJson(res, 502, {error: redactSecrets(error.message), device: devices.describe(id)}); }
+  });
+
+  route('DELETE', /^\/api\/devices\/(ATECH-[0-9A-F]{12})$/, async (req, res, [id]) => {
+    sendJson(res, devices.remove(id) ? 200 : 404, {ok: true});
+  });
+
+  route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/control$/, async (req, res, [id]) => {
+    const body = await readJson(req);
+    try { sendJson(res, 200, await devices.control(id, String(body.op || '').toLowerCase())); }
+    catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); }
+  });
+
+  // ---- deployments over the LAN ----
+  route('POST', /^\/api\/builds\/([0-9a-f]+)\/deploy$/, async (req, res, [id]) => {
+    const body = await readJson(req);
+    let deployment;
+    try { deployment = deployments.create({jobId: id, deviceId: String(body.deviceId || '').trim()}); }
+    catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); return; }
+    deployments.run(deployment.id).catch(() => {});
+    sendJson(res, 202, {id: deployment.id, deployment});
+  });
+
+  route('GET', /^\/api\/deployments$/, async (req, res) => { sendJson(res, 200, deployments.list()); });
+
+  route('GET', /^\/api\/deployments\/([0-9a-f]+)$/, async (req, res, [id]) => {
+    const deployment = deployments.get(id);
+    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    sendJson(res, 200, deployment);
+  });
+
+  route('POST', /^\/api\/deployments\/([0-9a-f]+)\/abort$/, async (req, res, [id]) => {
+    const deployment = deployments.abort(id);
+    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    sendJson(res, 200, deployment);
+  });
+
+  route('GET', /^\/api\/deployments\/([0-9a-f]+)\/events$/, async (req, res, [id]) => {
+    const deployment = deployments.get(id);
+    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive'});
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const finished = state => ['verified', 'failed', 'aborted'].includes(state);
+    const finish = snapshot => { send('done', {state: snapshot.state}); res.end(); };
+    send('deployment', deployment);
+    if (finished(deployment.state)) { finish(deployment); return; }
+    const unsubscribe = deployments.subscribe(id, snapshot => {
+      send('deployment', snapshot);
+      if (finished(snapshot.state)) { unsubscribe(); finish(snapshot); }
+    });
+    const keepAlive = setInterval(() => res.write(': ping\n\n'), 15000);
+    req.on('close', () => { clearInterval(keepAlive); unsubscribe(); });
   });
 
   route('GET', /^\/api\/demos\/(\d)$/, async (req, res, [demo]) => {
@@ -199,6 +316,10 @@ function createServer({config, jobs, installer = installerModule, pioVersion = n
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
     try {
+      if (pathname.startsWith('/api/') && !keyPresented(req, url, config.dashboardKey)) {
+        sendJson(res, 401, {error: 'This builder requires its dashboard key. Open the link printed by the backend (it carries ?key=).', keyRequired: true});
+        return;
+      }
       for (const {method, pattern, handler} of handlers) {
         const match = pathname.match(pattern);
         if (match && req.method === method) { await handler(req, res, match.slice(1), url); return; }
@@ -233,7 +354,12 @@ async function main() {
   try { pioVersion = (await runPio(['--version'], {timeoutMs: 60000, pioBin: config.pio})).log.trim(); }
   catch (error) { console.warn(`PlatformIO not found at ${config.pio}: ${error.message}`); }
 
-  const server = createServer({config, jobs, pioVersion});
+  const loopback = config.host === '127.0.0.1' || config.host === 'localhost' || config.host === '::1';
+  if (!loopback && !config.dashboardKey) config.dashboardKey = crypto.randomBytes(12).toString('base64url');
+  const devices = new DeviceRegistry({config});
+  const deployments = new DeploymentStore({config, jobs, devices});
+  const simulated = await startSimulatedDevices(config, devices);
+  const server = createServer({config, jobs, devices, deployments, pioVersion, simulated});
   server.on('error', error => {
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${config.port} on ${config.host} is already in use (an old "python3 -m http.server ${config.port}" ` +
@@ -255,18 +381,44 @@ async function main() {
     console.log(`  provider: ${provider.name} (${provider.model})`);
     console.log(`  pio:      ${pioVersion || 'not found'}`);
     console.log(`  builds:   ${config.buildsDir}`);
-    console.log(`  Demo 1:   http://localhost:${config.port}/demo1/`);
-    console.log(`  Demo 2:   http://localhost:${config.port}/demo2/`);
-    if (config.host !== '127.0.0.1' && config.host !== 'localhost') {
-      for (const url of lanUrls(config.port)) console.log(`  LAN:      ${url}/ (Safari/iPhone download path; no Web Bluetooth there)`);
+    const suffix = config.dashboardKey ? `?key=${config.dashboardKey}` : '';
+    console.log(`  Demo 1:   http://localhost:${config.port}/demo1/${suffix}`);
+    console.log(`  Demo 2:   http://localhost:${config.port}/demo2/${suffix}`);
+    console.log(`  devices:  ${devices.list().length} paired (${devices.file})`);
+    for (const sim of simulated) {
+      console.log(`  SIMULATED board ${sim.state.id} (Demo ${sim.state.demo}) at http://127.0.0.1:${sim.port}/api/identity; no hardware involved`);
+    }
+    if (!loopback) {
+      for (const url of lanUrls(config.port)) console.log(`  LAN:      ${url}/demo1/${suffix}  (Safari on iPhone/iPad: open this link; Wi-Fi deploy needs no Bluetooth)`);
+      console.log('  The dashboard key above is required for every API call on this non-loopback listener.');
     } else {
-      console.log('  Pass --host 0.0.0.0 to expose the download links to a phone on the same Wi-Fi.');
+      console.log('  Pass --host 0.0.0.0 to open the dashboard to phones on the same Wi-Fi (a dashboard key is then generated).');
     }
   });
+}
+
+// Simulated boards for hardware-free demos and browser testing. They run the
+// same protocol as the firmware but prove nothing about real ESP32 speed.
+async function startSimulatedDevices(config, devices) {
+  const spec = String(config.simulatedDevices || '').trim().toLowerCase();
+  if (!spec || spec === '0' || spec === 'false') return [];
+  const demos = spec === 'all' || spec === 'true' ? [1, 2] : spec.split(',').map(Number).filter(n => n === 1 || n === 2);
+  const started = [];
+  for (const demo of demos.length ? demos : [1]) {
+    const id = `ATECH-51D0000000E${demo}`;
+    const secret = `simulated-board-${demo}-authorization-code`;
+    const device = createFakeDevice({id, demo, build: 'stock', secret, host: '127.0.0.1', port: 0, rebootMs: 1500,
+                                     log: text => console.log(`  [simulated ${id}] ${text}`)});
+    const {host, port} = await device.start();
+    devices.upsert({id, suffix: id.slice(-6), demo, name: `Simulated Demo ${demo} board`, host, port, hostname: `atech-${id.slice(-6).toLowerCase()}`,
+                    firmware: device.state.fw, build: 'stock', secret, simulated: true, pairedAt: new Date().toISOString()});
+    started.push(device);
+  }
+  return started;
 }
 
 if (require.main === module) {
   main().catch(error => { console.error(redactSecrets(error.message)); process.exit(1); });
 }
 
-module.exports = {createServer, safeJoin};
+module.exports = {createServer, safeJoin, keyPresented, startSimulatedDevices};

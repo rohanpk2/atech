@@ -25,7 +25,8 @@ assert.doesNotMatch(impl, /#include\s+["<]AtechApp\.h[">]/, 'the core must not i
 
 assert.match(core, /struct AtechCoreConfig/);
 for (const symbol of ['coreBegin', 'coreAttachBle', 'coreLoop', 'coreSuspendApp', 'coreResumeApp',
-                       'identityJson', 'confirmBoot', 'rollbackToPrevious', 'canRollback', 'safeMode']) {
+                       'identityJson', 'confirmBoot', 'rollbackToPrevious', 'canRollback', 'safeMode',
+                       'coreTryAcquireOta', 'coreReleaseOta', 'coreOtaOwner']) {
   assert.match(core, new RegExp(`\\b${symbol}\\(`), `AtechCore.h must declare ${symbol}`);
 }
 assert.match(core, /enum class LedOwner : uint8_t \{ Off = 0, BlinkBlue = 1, BlinkGreen = 2, App = 3 \}/);
@@ -44,12 +45,13 @@ assert.ok(table, 'AtechCore.cpp must define ALLOWED_PINS[]');
 const pins = table[1].split(',').map(value => Number(value.trim())).filter(Number.isFinite);
 assert.deepEqual(pins, [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47]);
 
-assert.match(impl, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.0\.0"/);
+assert.match(impl, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.1\.0"/);
 for (const key of ['id', 'suffix', 'demo', 'build', 'app', 'ver', 'slot', 'slotSize', 'pending',
-                   'canRollback', 'safe', 'crashes', 'target', 'paired', 'appState', 'loops', 'up']) {
+                   'canRollback', 'safe', 'crashes', 'target', 'paired', 'appState', 'otaOwner', 'loops', 'up']) {
   assert.ok(impl.includes(`\\"${key}\\":`), `identity JSON must contain the ${key} key`);
 }
 
+assert.match(impl, /portENTER_CRITICAL\(&otaLock\)/, 'the OTA ownership lock must be a critical section (used from the httpd task and the loop)');
 assert.doesNotMatch(wifi, /mac & 0xFFFFFFULL/, 'Wi-Fi SSID suffix must not use the OUI bytes');
 assert.match(wifi, /mac\[3\], mac\[4\], mac\[5\]/, 'Wi-Fi SSID suffix must use the device-unique MAC bytes');
 

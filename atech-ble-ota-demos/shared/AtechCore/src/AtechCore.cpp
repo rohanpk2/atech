@@ -28,7 +28,7 @@ void appLoop();
 
 namespace {
 
-constexpr char ATECH_CORE_VERSION[] = "1.0.0";
+constexpr char ATECH_CORE_VERSION[] = "1.1.0";
 constexpr char IDENTITY_SERVICE_UUID[] = "a7ec0100-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char IDENTITY_CHAR_UUID[] = "a7ec0101-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char CONTROL_CHAR_UUID[] = "a7ec0102-2e47-4dd2-82a4-9c2cf6eaa001";
@@ -80,6 +80,8 @@ bool crashCleared = false;
 bool bleAttached = false;
 uint32_t restartAtMs = 0;
 int lastCoreLedState = -1;
+portMUX_TYPE otaLock = portMUX_INITIALIZER_UNLOCKED;
+char otaOwnerText[12] = "";
 
 const char *appStateName() {
   switch (appState) {
@@ -448,6 +450,27 @@ void setLedOwner(LedOwner newOwner) {
 
 LedOwner ledOwner() { return owner; }
 
+bool coreTryAcquireOta(const char *owner) {
+  if (!owner || !*owner) return false;
+  bool acquired = false;
+  portENTER_CRITICAL(&otaLock);
+  if (!otaOwnerText[0] || strcmp(otaOwnerText, owner) == 0) {
+    strncpy(otaOwnerText, owner, sizeof(otaOwnerText) - 1);
+    otaOwnerText[sizeof(otaOwnerText) - 1] = '\0';
+    acquired = true;
+  }
+  portEXIT_CRITICAL(&otaLock);
+  return acquired;
+}
+
+void coreReleaseOta(const char *owner) {
+  portENTER_CRITICAL(&otaLock);
+  if (!owner || strcmp(otaOwnerText, owner) == 0) otaOwnerText[0] = '\0';
+  portEXIT_CRITICAL(&otaLock);
+}
+
+const char *coreOtaOwner() { return otaOwnerText; }
+
 String identityJson() {
   const esp_partition_t *running = esp_ota_get_running_partition();
   const bool paired = !config.targetDeviceId || !*config.targetDeviceId ||
@@ -473,6 +496,7 @@ String identityJson() {
   json += ",\"target\":\""; json += jsonEscape(config.targetDeviceId);
   json += "\",\"paired\":"; json += paired ? "true" : "false";
   json += ",\"appState\":\""; json += appStateName();
+  json += "\",\"otaOwner\":\""; json += otaOwnerText;
   json += "\",\"loops\":"; json += String(loopCounter);
   json += ",\"up\":"; json += String(millis());
   json += "}";

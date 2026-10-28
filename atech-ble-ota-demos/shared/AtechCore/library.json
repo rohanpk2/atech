@@ -1,6 +1,6 @@
 {
   "name": "AtechCore",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Protected Atech firmware core: device identity, identity GATT service, sandboxed app task, LED and GPIO facades, rollback confirmation and safe mode for the ESP32-S3 demos",
   "frameworks": "arduino",
   "platforms": "espressif32",

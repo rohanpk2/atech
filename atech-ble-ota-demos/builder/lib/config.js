@@ -66,6 +66,14 @@ function loadConfig(env = process.env) {
     providerOverride: env.ATECH_LLM_PROVIDER || null,
     port: Number(env.ATECH_BUILDER_PORT) || 5173,
     host: env.ATECH_BUILDER_HOST || '127.0.0.1',
+    // LAN deployment: chunk size per authenticated PUT and the board's service port.
+    lanChunkBytes: Number(env.ATECH_LAN_CHUNK_BYTES) || 128 * 1024,
+    lanPort: Number(env.ATECH_LAN_PORT) || 8080,
+    // Optional shared key for the dashboard API. Required automatically when the
+    // backend listens on a non-loopback address (phones on the same Wi-Fi).
+    dashboardKey: env.ATECH_BUILDER_KEY || null,
+    // "1"/"all"/"1,2": start simulated boards in-process (no hardware involved).
+    simulatedDevices: env.ATECH_SIMULATED_DEVICE || null,
   };
 }
 

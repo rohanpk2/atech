@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>Atech Device Console</title>
-  <link rel="stylesheet" href="styles.css?v=2">
-  <link rel="stylesheet" href="/shared/builder.css">
+  <link rel="stylesheet" href="styles.css?v=3">
+  <link rel="stylesheet" href="/shared/builder.css?v=3">
 </head>
 <body>
   <header class="topbar">
@@ -14,90 +14,142 @@
     <div class="topbar-actions">
       <div id="globalConnection" class="status offline">
         <i aria-hidden="true"></i>
-        <span id="globalConnectionText">Disconnected</span>
+        <span id="globalConnectionText">Bluetooth off</span>
       </div>
       <a class="btn text" href="install.html">USB install</a>
-      <button id="connect" class="btn primary" type="button">Connect</button>
+      <button id="connect" class="btn secondary" type="button">Connect Bluetooth</button>
       <button id="disconnect" class="btn secondary" type="button" disabled>Disconnect</button>
     </div>
   </header>
 
   <main class="page">
+    <div id="keyBanner" class="key-banner" role="alert" hidden></div>
     <div id="compatibility" class="banner" role="alert" hidden></div>
 
-    <div class="segmented" role="group" aria-label="Update method">
-      <button id="useBluetooth" type="button" aria-pressed="false">Bluetooth</button>
-      <button id="useWifi" type="button" aria-pressed="false">Wi-Fi</button>
-    </div>
-
-    <section id="wifiTransportPanel" class="card" aria-labelledby="wifi-heading" hidden>
-      <div class="card-head">
-        <h2 id="wifi-heading">Update over Wi-Fi</h2>
-        <a class="btn primary" href="http://192.168.4.1" target="_blank" rel="noreferrer">Open 192.168.4.1</a>
+    <section class="card device-panel" aria-labelledby="deviceName">
+      <div>
+        <div class="device-title">
+          <span id="devDot" class="dot" aria-hidden="true"></span>
+          <h2 id="deviceName">No device yet</h2>
+          <span id="devBadge" class="badge neutral">Not found</span>
+        </div>
+        <p id="devStatus" class="note" style="margin:8px 0 0">Looking for your board on this network.</p>
+        <dl class="stats device-facts">
+          <div><dt>Device ID</dt><dd id="deviceId" class="mono">Unknown</dd></div>
+          <div><dt>Pairing code</dt><dd id="pairingCode" class="mono">Unknown</dd></div>
+          <div><dt>Wi-Fi</dt><dd id="devWifi">Unknown</dd></div>
+          <div><dt>IP address</dt><dd id="devIp" class="mono">Unknown</dd></div>
+          <div><dt>Firmware</dt><dd id="firmwareVersion" class="mono">Unknown</dd></div>
+          <div><dt>App</dt><dd id="appInfo">Unknown</dd></div>
+          <div><dt>Bluetooth</dt><dd id="devBle">Not connected</dd></div>
+          <div><dt>Last acknowledgment</dt><dd id="lastSeen">Never</dd></div>
+          <div><dt>Heartbeat</dt><dd id="signalState" class="signal offline">None</dd></div>
+        </dl>
       </div>
-      <p class="note">This dashboard does not fetch or upload to the device. Disconnect any active Bluetooth session, join the board's hotspot, and finish the upload on its local page.</p>
+      <div class="device-actions">
+        <button id="devFind" class="btn secondary" type="button">Find devices</button>
+        <button id="devForget" class="btn text" type="button" hidden>Forget</button>
+      </div>
+      <div id="devList" class="device-list" style="grid-column:1 / -1" hidden></div>
+      <div id="devPairForm" class="device-form" style="grid-column:1 / -1" hidden>
+        <input id="devPairHost" type="text" autocomplete="off" spellcheck="false" placeholder="Board IP address or atech-xxxxxx.local">
+        <input id="devPairToken" type="password" autocomplete="off" placeholder="OTA authorization code (serial console at boot)">
+        <button id="devPair" class="btn primary" type="button">Pair</button>
+      </div>
+      <p id="devHint" class="hint" style="grid-column:1 / -1"></p>
+    </section>
+
+    <section class="card ai-card" aria-labelledby="ai-heading" style="margin-top:16px">
+      <div class="card-head">
+        <div>
+          <h2 id="ai-heading">AI firmware builder</h2>
+          <span id="aiBackend" class="ai-backend">Checking the builder backend</span>
+        </div>
+        <span id="aiBadge" class="badge neutral">Idle</span>
+      </div>
+      <p class="note">Describe what the board should do. The backend asks the model for a sandboxed C++ app, compiles it with PlatformIO in an isolated workspace, validates the image against this board, and shows the code here for review. Nothing reaches the board until you click Deploy.</p>
+      <textarea id="aiPrompt" class="ai-prompt" rows="3" spellcheck="false"
+                placeholder="Make the onboard LED blink three times quickly, pause for two seconds, and repeat."></textarea>
+      <div id="aiExamples" class="ai-examples" aria-label="Example prompts"></div>
+      <div class="ai-actions">
+        <button id="aiBuild" class="btn primary" type="button" disabled>Generate firmware</button>
+        <span id="aiAttempts" class="ai-attempts"></span>
+      </div>
+      <p id="aiStatus" class="state neutral" aria-live="polite"></p>
+      <div id="aiProgress" class="progress ai-progress" role="progressbar" aria-label="Build progress"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="aiProgressBar"></div>
+      </div>
+      <div id="aiLog" class="ai-diags" hidden></div>
+      <p id="aiBrowserNote" class="ai-note" hidden></p>
+      <div id="aiReview" class="ai-review" hidden>
+        <h3>Generated application (src/app/user_app.cpp)</h3>
+        <p id="aiSummary" class="ai-summary"></p>
+        <small id="aiCodeMeta" class="ai-code-meta"></small>
+        <pre id="aiCode" class="ai-code" tabindex="0"></pre>
+      </div>
+      <p id="aiTarget" class="ai-target"></p>
+    </section>
+
+    <section class="card" aria-labelledby="deploy-heading" style="margin-top:16px">
+      <div class="card-head">
+        <h2 id="deploy-heading">Deployment</h2>
+        <span id="deployBadge" class="badge neutral">Waiting for a build</span>
+      </div>
+      <div class="methods" role="group" aria-label="Deployment method">
+        <button id="methodWifi" class="method" type="button" aria-pressed="false">
+          <strong>Wi-Fi <span class="tag">preferred</span></strong>
+          <small id="methodWifiNote">Needs the board on your Wi-Fi and paired with this backend.</small>
+        </button>
+        <button id="methodBle" class="method" type="button" aria-pressed="false">
+          <strong>Bluetooth <span class="tag">backup</span></strong>
+          <small id="methodBleNote">Chrome with Web Bluetooth and a connected board; custom GATT OTA.</small>
+        </button>
+        <button id="methodHotspot" class="method" type="button" aria-pressed="false">
+          <strong>Board hotspot <span class="tag">last resort</span></strong>
+          <small id="methodHotspotNote">Download the file and upload it on the board's own page.</small>
+        </button>
+      </div>
+      <p id="deployStatus" class="state neutral" aria-live="polite">Generate firmware, review it, then click Deploy.</p>
+      <div id="deployProgress" class="progress" role="progressbar" aria-label="Deployment progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="deployProgressBar"></div>
+      </div>
+      <dl class="deploy-stats">
+        <div><dt>Transport</dt><dd id="deployTransport">None</dd></div>
+        <div><dt>Progress</dt><dd id="deployPercent">0%</dd></div>
+        <div><dt>Transferred</dt><dd id="deployBytes">0 B</dd></div>
+        <div><dt>Speed</dt><dd id="deploySpeed">0.0 KiB/s</dd></div>
+        <div><dt>Time remaining</dt><dd id="deployEta">Unknown</dd></div>
+        <div><dt>Transfer time</dt><dd id="deployTime">None</dd></div>
+      </dl>
+      <div id="deployPhases" class="deploy-phase" aria-label="Deployment phases"></div>
+      <ul id="deployChecks" class="deploy-checks" hidden></ul>
+      <div class="deploy-main">
+        <button id="aiDeploy" class="btn primary" type="button" disabled>Deploy</button>
+        <button id="deployAbort" class="btn secondary" type="button" hidden>Abort</button>
+        <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware.bin</a>
+        <button id="aiConfirm" class="btn secondary" type="button" hidden>Confirm this boot (cancel rollback)</button>
+        <button id="aiRollback" class="btn secondary" type="button" hidden>Roll back to previous firmware</button>
+      </div>
+    </section>
+
+    <section id="wifiTransportPanel" class="card" aria-labelledby="wifi-heading" style="margin-top:16px" hidden>
+      <div class="card-head">
+        <h2 id="wifi-heading">Board hotspot: set up Wi-Fi or upload by hand</h2>
+        <a class="btn secondary" href="http://192.168.4.1" target="_blank" rel="noreferrer">Open 192.168.4.1</a>
+      </div>
+      <p class="note">This dashboard does not fetch or upload to the device over the hotspot. Disconnect any active Bluetooth session, join the board's hotspot, and finish on its local page. Use this once to join the board to your home Wi-Fi; after that, Deploy uses Wi-Fi directly.</p>
       <ol class="steps">
         <li>With the firmware running, hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it. Do not press RST.</li>
-        <li>Join <code>Atech-OTA-D1-&lt;suffix&gt;</code> in Wi-Fi settings. The suffix, WPA2 password, and portal token come from the 115200-baud serial output or the deployment record. Stay connected if the phone warns that the network has no Internet.</li>
-        <li>Open <code>http://192.168.4.1</code> in Safari or Chrome and enter the portal token.</li>
-        <li>Select the application <code>firmware.bin</code>, not a bootloader, partitions, or merged image, then tap Deploy Firmware.</li>
-        <li>Wait for verified success and reboot. Rejoin the hotspot if prompted to see the new version. Wi-Fi mode times out and Bluetooth resumes.</li>
+        <li>Join <code>Atech-OTA-D1-&lt;suffix&gt;</code> in Wi-Fi settings. The suffix is the board's pairing code; the WPA2 password and the OTA authorization code come from the 115200-baud serial output printed at boot (the USB installer console shows it). Stay connected if the phone warns that the network has no Internet.</li>
+        <li>Open <code>http://192.168.4.1</code> in Safari or Chrome and enter the OTA authorization code.</li>
+        <li><strong>Home Wi-Fi:</strong> tap Scan, choose your 2.4 GHz network, enter its password and tap <strong>Join this network</strong>. The page reports the board's new IP address. Back here, click <strong>Find devices</strong> and pair with the same code.</li>
+        <li><strong>Manual upload:</strong> download the firmware above, select that application <code>firmware.bin</code> on the board's page (not a bootloader, partitions, or merged image), then tap Deploy Firmware. Wait for verified success and reboot.</li>
       </ol>
     </section>
 
-    <div id="bleConsole">
-      <section class="card device" aria-labelledby="deviceName">
-        <h2 id="deviceName">No device connected</h2>
-        <dl class="stats">
-          <div><dt>Firmware</dt><dd id="firmwareVersion" class="mono">Unknown</dd></div>
-          <div><dt>Last acknowledgment</dt><dd id="lastSeen">Never</dd></div>
-          <div><dt>Heartbeat</dt><dd id="signalState" class="signal offline">None</dd></div>
-          <div><dt>Device ID</dt><dd id="deviceId" class="mono">Unknown</dd></div>
-          <div><dt>Pairing code</dt><dd id="pairingCode" class="mono">Unknown</dd></div>
-          <div><dt>App</dt><dd id="appInfo">Unknown</dd></div>
-        </dl>
-      </section>
-
-      <section class="card ai-card" aria-labelledby="ai-heading" style="margin-top:16px">
-        <div class="card-head">
-          <div>
-            <h2 id="ai-heading">AI firmware builder</h2>
-            <span id="aiBackend" class="ai-backend">Checking the builder backend</span>
-          </div>
-          <span id="aiBadge" class="badge neutral">Idle</span>
-        </div>
-        <p class="note">Describe what the board should do. The backend asks the model for a sandboxed C++ app, compiles it with PlatformIO in an isolated workspace, validates the image against this board, and shows the code here for review. Nothing reaches the board until you click Deploy.</p>
-        <textarea id="aiPrompt" class="ai-prompt" rows="3" spellcheck="false"
-                  placeholder="Make the onboard LED blink three times quickly, pause for two seconds, and repeat."></textarea>
-        <div id="aiExamples" class="ai-examples" aria-label="Example prompts"></div>
-        <div class="ai-actions">
-          <button id="aiBuild" class="btn primary" type="button" disabled>Build firmware</button>
-          <span id="aiAttempts" class="ai-attempts"></span>
-        </div>
-        <p id="aiStatus" class="state neutral" aria-live="polite"></p>
-        <div id="aiProgress" class="progress ai-progress" role="progressbar" aria-label="Build progress"
-             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <div id="aiProgressBar"></div>
-        </div>
-        <div id="aiLog" class="ai-diags" hidden></div>
-        <p id="aiBrowserNote" class="ai-note" hidden></p>
-        <div id="aiReview" class="ai-review" hidden>
-          <h3>Generated application (src/app/user_app.cpp)</h3>
-          <p id="aiSummary" class="ai-summary"></p>
-          <small id="aiCodeMeta" class="ai-code-meta"></small>
-          <pre id="aiCode" class="ai-code" tabindex="0"></pre>
-        </div>
-        <p id="aiTarget" class="ai-target"></p>
-        <div class="ai-deploy-row">
-          <button id="aiDeploy" class="btn primary" type="button" disabled>Deploy to device</button>
-          <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware.bin</a>
-        </div>
-        <div class="ai-recovery">
-          <button id="aiConfirm" class="btn secondary" type="button" hidden>Confirm this boot (cancel rollback)</button>
-          <button id="aiRollback" class="btn secondary" type="button" hidden>Roll back to previous firmware</button>
-        </div>
-      </section>
-
+    <details id="bleConsole" class="advanced">
+      <summary>Advanced: Bluetooth commands, connection test and manual firmware file</summary>
       <div class="grid">
         <section class="card" aria-labelledby="command-heading">
           <div class="card-head"><h2 id="command-heading">Commands</h2></div>
@@ -134,7 +186,7 @@
         </section>
 
         <section class="card" aria-labelledby="test-heading">
-          <div class="card-head"><h2 id="test-heading">Connection test</h2></div>
+          <div class="card-head"><h2 id="test-heading">Bluetooth connection test</h2></div>
           <dl class="kv stack" aria-live="polite">
             <div><dt>Challenge</dt><dd id="challengeValue" class="mono">Not sent</dd></div>
             <div><dt>Result</dt><dd id="testResult" class="test-result neutral">Not run</dd></div>
@@ -146,9 +198,10 @@
 
         <section class="card span" aria-labelledby="ota-heading">
           <div class="card-head">
-            <h2 id="ota-heading">Firmware update</h2>
+            <h2 id="ota-heading">Manual firmware file over Bluetooth</h2>
             <span id="otaBadge" class="badge neutral">Ready</span>
           </div>
+          <p class="note">Advanced: deploy a compiled firmware.bin by hand over the custom Atech GATT protocol. The normal flow is Generate then Deploy above.</p>
           <div class="ota-controls">
             <label class="file" for="bin">
               <input type="file" accept=".bin,application/octet-stream" id="bin">
@@ -163,9 +216,9 @@
               <option value="60">60-byte payload</option>
               <option value="20">20-byte payload</option>
             </select>
-            <button id="deploy" class="btn primary" type="button" disabled>Deploy</button>
+            <button id="deploy" class="btn primary" type="button" disabled>Deploy file</button>
           </div>
-          <p id="otaState" class="state neutral" aria-live="polite">Connect an ESP32-S3 and select a compiled firmware.bin.</p>
+          <p id="otaState" class="state neutral" aria-live="polite">Connect an ESP32-S3 over Bluetooth and select a compiled firmware.bin.</p>
           <div class="progress" role="progressbar" aria-label="Firmware upload progress"
                aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="bar"></div>
@@ -176,21 +229,21 @@
             <span id="progressSpeed">0.0 KiB/s</span>
           </div>
         </section>
-
-        <section class="card span" aria-labelledby="log-heading">
-          <div class="card-head">
-            <h2 id="log-heading">Activity</h2>
-            <button id="clearLog" class="btn text" type="button">Clear</button>
-          </div>
-          <div id="log" class="log" role="log" aria-live="polite"></div>
-        </section>
       </div>
-    </div>
+    </details>
+
+    <section class="card span" aria-labelledby="log-heading" style="margin-top:16px">
+      <div class="card-head">
+        <h2 id="log-heading">Activity</h2>
+        <button id="clearLog" class="btn text" type="button">Clear</button>
+      </div>
+      <div id="log" class="log" role="log" aria-live="polite"></div>
+    </section>
   </main>
 
-  <script src="/shared/atech-identity.js"></script>
-  <script src="/shared/atech-builder.js"></script>
-  <script src="protocol.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="/shared/atech-identity.js?v=3"></script>
+  <script src="/shared/atech-builder.js?v=3"></script>
+  <script src="protocol.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

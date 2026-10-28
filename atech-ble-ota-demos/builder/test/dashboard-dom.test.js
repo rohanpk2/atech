@@ -12,6 +12,8 @@ const {JSDOM, VirtualConsole} = require('jsdom');
 const {loadConfig} = require('../lib/config');
 
 const config = loadConfig({});
+const openWindows = [];
+test.after(() => { for (const w of openWindows) { try { w.close(); } catch (_) { /* ignore */ } } });
 
 function fakeFetch(routes) {
   return async (url) => {
@@ -31,6 +33,7 @@ async function bootDashboard(demo, {bluetooth = true} = {}) {
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
   const dom = new JSDOM(html, {url: 'http://localhost:5173/demo' + demo + '/', runScripts: 'outside-only', virtualConsole});
   const {window} = dom;
+  openWindows.push(window);
   window.fetch = fakeFetch({
     '/api/health': {ok: true, provider: 'fake', model: 'fake-model'},
   });
@@ -66,23 +69,26 @@ for (const demo of [1, 2]) {
     assert.ok(window[`AtechDemo${demo}Transport`], 'transport is exposed for the builder');
     assert.match(doc.getElementById('aiBackend').textContent, /Backend online: fake/);
     assert.equal(doc.getElementById('aiBuild').disabled, false, 'build button enables once the backend answers');
-    assert.equal(doc.getElementById('aiDeploy').disabled, true, 'deploy stays disabled without a build and a board');
+    assert.equal(doc.getElementById('aiDeploy').disabled, true, 'deploy stays disabled without a build');
     assert.equal(doc.getElementById('aiExamples').children.length, window.AtechBuilder.EXAMPLES.length);
-    assert.match(doc.getElementById('aiTarget').textContent, /No device connected/);
+    assert.match(doc.getElementById('aiTarget').textContent, /No board selected yet/);
     assert.equal(doc.getElementById('aiBrowserNote').hidden, true);
+    assert.equal(doc.getElementById('devFind').disabled, false, 'Wi-Fi discovery is offered');
     assert.ok(doc.getElementById('log').children.length >= 1, 'activity log receives the ready line');
     assert.equal(doc.getElementById('connect').disabled, false);
   });
 
-  test(`Demo ${demo} dashboard without Web Bluetooth selects Wi-Fi and shows the honest note`, async () => {
+  test(`Demo ${demo} dashboard without Web Bluetooth (Safari) still offers Wi-Fi and explains the hotspot fallback`, async () => {
     const {window, errors} = await bootDashboard(demo, {bluetooth: false});
     const doc = window.document;
     assert.deepEqual(errors, []);
-    assert.equal(doc.body.dataset.otaTransport, 'wifi');
+    assert.equal(doc.body.dataset.deployMethod, 'hotspot', 'no board reachable yet: hotspot instructions are shown');
     assert.equal(doc.getElementById('aiBrowserNote').hidden, false);
     assert.match(doc.getElementById('aiBrowserNote').textContent, /pairing and upload are manual/);
-    assert.equal(doc.getElementById('useBluetooth').disabled, true);
-    assert.match(doc.getElementById('aiTarget').textContent, /No Bluetooth in this browser/);
+    assert.match(doc.getElementById('aiBrowserNote').textContent, /Wi-Fi deployment works in Safari and Chrome/);
+    assert.equal(doc.getElementById('connect').disabled, true);
+    assert.match(doc.getElementById('methodBleNote').textContent, /No Web Bluetooth/);
+    assert.equal(doc.getElementById('devFind').disabled, false);
   });
 }
 
@@ -97,10 +103,20 @@ test('the builder card renders a ready job and refuses to deploy a mismatched de
   doc.getElementById('aiPrompt').value = 'Blink';
   doc.getElementById('aiBuild').click();
   await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(doc.getElementById('aiBadge').textContent, 'Ready to deploy');
+  assert.equal(doc.getElementById('aiBadge').textContent, 'Validated');
   assert.equal(doc.getElementById('aiCode').textContent, 'void appLoop() {}');
   assert.equal(doc.getElementById('aiDownload').hidden, false);
   assert.match(doc.getElementById('aiDownload').getAttribute('href'), /\/api\/builds\/abc\/firmware\.bin/);
-  assert.equal(doc.getElementById('aiDeploy').disabled, true, 'no board connected');
-  assert.match(doc.getElementById('aiDeploy').title, /Connect the board/);
+  assert.equal(doc.getElementById('aiDeploy').disabled, false, 'with no board reachable the button downloads for the hotspot');
+  assert.match(doc.getElementById('aiDeploy').textContent, /Download firmware for the hotspot portal/);
+  // A Demo 1 board connected over Bluetooth cannot receive a Demo 2 build.
+  const transport = window.AtechDemo1Transport;
+  transport.isConnected = () => true;
+  transport.identity = () => ({id: 'ATECH-A1B2C3D4E5F6', suffix: 'D4E5F6', demo: 1, build: 'stock', app: 'x', ver: 1, slotSize: 6291456,
+                               pending: false, canRollback: false, safe: false, paired: true, appState: 'running', loops: 1, up: 1});
+  window.AtechBuilder; doc.getElementById('aiPrompt').dispatchEvent(new window.Event('input'));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  doc.getElementById('methodBle').click();
+  assert.equal(doc.getElementById('aiDeploy').disabled, true, 'demo mismatch blocks the deploy');
+  assert.match(doc.getElementById('aiDeploy').title, /for Demo 2/);
 });

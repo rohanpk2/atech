@@ -1,5 +1,6 @@
 #include "AtechWifiOta.h"
 
+#include <AtechWifiLan.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -56,10 +57,31 @@ const char PORTAL_HTML[] PROGMEM = R"ATECHHTML(
     <div id="postBoot" class="status" role="status" aria-live="polite" hidden></div>
   </section>
 
-  <section class="card" aria-labelledby="deploy-title">
-    <h2 id="deploy-title">Deploy application firmware</h2>
+  <section class="card" aria-labelledby="auth-title">
+    <h2 id="auth-title">Authorization</h2>
     <label for="token">OTA authorization code</label>
     <input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Recorded during USB provisioning">
+    <p class="small">The same per-device code authorizes Wi-Fi setup below and firmware uploads. It is never shown by this page.</p>
+  </section>
+
+  <section class="card" id="wifiCard" aria-labelledby="wifi-title" hidden>
+    <h2 id="wifi-title">Home Wi-Fi</h2>
+    <div id="wifiStatus" class="status" role="status" aria-live="polite">Checking…</div>
+    <label for="wifiSsid">Network name (2.4 GHz)</label>
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <input id="wifiSsid" list="wifiList" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Choose or type an SSID" style="flex:1;border:1px solid var(--line);border-radius:11px;padding:12px;background:#07111f;color:var(--ink)">
+      <button id="wifiScan" class="secondary" style="width:auto;margin:0;padding:12px 14px">Scan</button>
+    </div>
+    <datalist id="wifiList"></datalist>
+    <label for="wifiPass">Wi-Fi password</label>
+    <input id="wifiPass" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Leave empty for an open network">
+    <button id="wifiSave">Join this network</button>
+    <button id="wifiForget" class="secondary">Forget home Wi-Fi</button>
+    <p class="small">Once the board is on your Wi-Fi it is found by the Atech dashboard and updates arrive in seconds. This hotspot stays available as the fallback.</p>
+  </section>
+
+  <section class="card" aria-labelledby="deploy-title">
+    <h2 id="deploy-title">Deploy application firmware (fallback)</h2>
     <label for="firmware">Application firmware.bin</label>
     <input id="firmware" type="file" accept=".bin,application/octet-stream">
     <div id="progressBar" class="bar" role="progressbar" aria-label="Firmware upload" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="bar"></span></div>
@@ -87,7 +109,15 @@ const char PORTAL_HTML[] PROGMEM = R"ATECHHTML(
   function done(message,kind){portalBusy=false;setResult(message,kind);deploy.disabled=!selected;exitButton.disabled=false;fileInput.disabled=false;tokenInput.disabled=false}
   async function waitForReboot(){let attempts=0;const poll=async()=>{attempts++;try{const s=await refresh();if(s.post_update_boot){done(`New firmware is online: ${s.version}. Wi-Fi access remains available for verification.`,'ok');return}}catch(e){}if(attempts<45)setTimeout(poll,2000);else done('The board rebooted, but this browser could not reconnect. Rejoin the same hotspot and reopen http://192.168.4.1 to verify.','bad')};setTimeout(poll,3500)}
   $('exit').addEventListener('click',async()=>{const token=tokenInput.value.trim();if(!token){setResult('Enter the OTA authorization code before exiting Wi-Fi mode.','bad');return}try{const r=await fetch('/api/exit',{method:'POST',headers:{'X-Atech-OTA-Key':token}});const d=await r.json();if(!r.ok)throw new Error(d.error||'Request rejected');setResult('Wi-Fi OTA is closing. The board is returning to BLE mode.','ok')}catch(e){setResult('Could not exit Wi-Fi mode: '+e.message,'bad')}});
-  refresh().catch(()=>{});setInterval(()=>{if(!portalBusy)refresh().catch(()=>{})},5000);
+  const wifiCard=$('wifiCard'),wifiStatus=$('wifiStatus'),wifiSsid=$('wifiSsid'),wifiPass=$('wifiPass'),wifiList=$('wifiList'),wifiScan=$('wifiScan'),wifiSave=$('wifiSave'),wifiForget=$('wifiForget');
+  let wifiSaving=false;
+  const setWifi=(text,kind='')=>{wifiStatus.textContent=text;wifiStatus.className='status '+kind};
+  const needToken=()=>{const t=tokenInput.value.trim();if(!t){setWifi('Enter the OTA authorization code first.','bad');tokenInput.focus()}return t};
+  async function wifiRefresh(){try{const r=await fetch('/api/wifi/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const w=await r.json();wifiCard.hidden=false;wifiForget.hidden=!w.enabled;if(!w.enabled)setWifi('No home Wi-Fi configured. Choose a 2.4 GHz network below.');else if(w.connected)setWifi(`Connected to ${w.ssid} as ${w.ip} (${w.hostname}.local, signal ${w.rssi} dBm). The dashboard can now find this board.`,'ok');else setWifi(`Configured for ${w.configured_ssid}; not connected yet${w.last_disconnect_reason?` (reason ${w.last_disconnect_reason})`:''}. Check the password and that the network is 2.4 GHz.`,'bad');return w}catch(e){wifiCard.hidden=true;return null}}
+  wifiScan.addEventListener('click',async()=>{const token=needToken();if(!token)return;wifiScan.disabled=true;setWifi('Scanning for 2.4 GHz networks…');try{const r=await fetch('/api/wifi/scan',{headers:{'X-Atech-OTA-Key':token},cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Scan failed');wifiList.replaceChildren();for(const n of d.networks||[]){const o=document.createElement('option');o.value=n.ssid;o.label=`${n.ssid} (${n.rssi} dBm${n.open?', open':''})`;wifiList.append(o)}setWifi(`${(d.networks||[]).length} network(s) found; pick one from the list.`)}catch(e){setWifi('Scan failed: '+e.message,'bad')}finally{wifiScan.disabled=false}});
+  wifiSave.addEventListener('click',async()=>{const token=needToken();if(!token)return;const ssid=wifiSsid.value.trim();if(!ssid){setWifi('Enter the network name.','bad');return}wifiSaving=true;wifiSave.disabled=true;setWifi('Saving and joining '+ssid+'…');try{const body=new URLSearchParams({ssid,pass:wifiPass.value});const r=await fetch('/api/wifi/save',{method:'POST',headers:{'X-Atech-OTA-Key':token,'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();if(!r.ok)throw new Error(d.error||'Save failed');wifiPass.value='';let tries=0;const poll=async()=>{tries++;const w=await wifiRefresh();if(w&&w.connected){wifiSaving=false;wifiSave.disabled=false;return}if(tries<15)setTimeout(poll,2000);else{wifiSaving=false;wifiSave.disabled=false;setWifi('The board has not joined '+ssid+' yet. It keeps retrying; check the password or try again.','bad')}};setTimeout(poll,2500)}catch(e){wifiSaving=false;wifiSave.disabled=false;setWifi('Could not save: '+e.message,'bad')}});
+  wifiForget.addEventListener('click',async()=>{const token=needToken();if(!token)return;try{const r=await fetch('/api/wifi/forget',{method:'POST',headers:{'X-Atech-OTA-Key':token}});const d=await r.json();if(!r.ok)throw new Error(d.error||'Request rejected');await wifiRefresh()}catch(e){setWifi('Could not forget: '+e.message,'bad')}});
+  refresh().catch(()=>{});wifiRefresh();setInterval(()=>{if(!portalBusy)refresh().catch(()=>{});if(!wifiSaving)wifiRefresh()},5000);
 })();
 </script></body></html>
 )ATECHHTML";
@@ -300,6 +330,45 @@ struct AtechWifiOtaPortal::Impl {
     return constantTimeEquals(server->header("X-Atech-OTA-Key"), otaToken);
   }
 
+  // Home Wi-Fi provisioning. Every mutating route and the scan require the
+  // per-device OTA authorization code; status reveals only the join result.
+  void configureWifiRoutes() {
+    AtechWifiLan *lan = config.lan;
+    if (!lan) return;
+    server->on("/api/wifi/status", HTTP_GET, [this, lan]() {
+      sendJson(200, lan->statusJson());
+    });
+    server->on("/api/wifi/scan", HTTP_GET, [this, lan]() {
+      if (!authorize()) { sendJson(401, F("{\"ok\":false,\"error\":\"Invalid OTA authorization code\"}")); return; }
+      if (uploading) { sendJson(409, F("{\"ok\":false,\"error\":\"Update is active\"}")); return; }
+      lastActivityMs = millis();
+      String body = F("{\"ok\":true,\"networks\":");
+      body += lan->scanJson();
+      body += F("}");
+      sendJson(200, body);
+    });
+    server->on("/api/wifi/save", HTTP_POST, [this, lan]() {
+      if (!authorize()) { sendJson(401, F("{\"ok\":false,\"error\":\"Invalid OTA authorization code\"}")); return; }
+      if (uploading) { sendJson(409, F("{\"ok\":false,\"error\":\"Update is active\"}")); return; }
+      lastActivityMs = millis();
+      const String ssid = server->arg("ssid");
+      const String pass = server->arg("pass");
+      if (!lan->saveCredentials(ssid, pass)) {
+        sendJson(400, String(F("{\"ok\":false,\"error\":\"")) + jsonEscape(lan->lastError()) + F("\"}"));
+        return;
+      }
+      Serial.printf("Home Wi-Fi credentials saved for \"%s\"; joining\n", ssid.c_str());
+      sendJson(200, F("{\"ok\":true,\"joining\":true}"));
+    });
+    server->on("/api/wifi/forget", HTTP_POST, [this, lan]() {
+      if (!authorize()) { sendJson(401, F("{\"ok\":false,\"error\":\"Invalid OTA authorization code\"}")); return; }
+      if (uploading || lan->isTransferring()) { sendJson(409, F("{\"ok\":false,\"error\":\"Update is active\"}")); return; }
+      lastActivityMs = millis();
+      if (!lan->forgetCredentials()) { sendJson(500, F("{\"ok\":false,\"error\":\"Could not erase the credentials\"}")); return; }
+      sendJson(200, F("{\"ok\":true}"));
+    });
+  }
+
   String uploadStateName() const {
     switch (uploadState) {
       case UploadState::Idle: return F("idle");
@@ -449,6 +518,10 @@ struct AtechWifiOtaPortal::Impl {
     }
     if (config.otherOtaBusy && config.otherOtaBusy()) {
       setFailure(F("Bluetooth OTA is active; disconnect and retry"), 409);
+      return false;
+    }
+    if (config.lan && config.lan->isTransferring()) {
+      setFailure(F("A Wi-Fi network update is active; wait for it to finish"), 409);
       return false;
     }
     String filename = upload.filename;
@@ -717,6 +790,13 @@ struct AtechWifiOtaPortal::Impl {
     });
   }
 
+  // Leaves the radio in station mode when a home network is configured,
+  // otherwise switches it off as the original portal did.
+  void releaseRadio() {
+    if (config.lan) config.lan->setSoftApActive(false);
+    else WiFi.mode(WIFI_OFF);
+  }
+
   bool startPortal() {
     if (!initialized || active) return active;
     if (config.otherOtaBusy && config.otherOtaBusy()) {
@@ -734,13 +814,17 @@ struct AtechWifiOtaPortal::Impl {
       return false;
     }
 
-    WiFi.mode(WIFI_AP);
+    // With a station manager the hotspot shares the radio with the home
+    // network (AP+STA) so a join can be verified from this page; otherwise
+    // the AP is the only interface, exactly as before.
+    if (config.lan) config.lan->setSoftApActive(true);
+    else WiFi.mode(WIFI_AP);
     if (!WiFi.softAPConfig(AP_IP, AP_IP, AP_MASK, IPAddress(192, 168, 4, 2), AP_IP) ||
         !WiFi.softAP(apSsid.c_str(), apPassword.c_str(), 1, 0, 4, false,
                      WIFI_AUTH_WPA2_PSK, WIFI_CIPHER_TYPE_CCMP)) {
       error = F("Could not start WPA2 SoftAP");
       WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_OFF);
+      releaseRadio();
       if (config.modeChanged) config.modeChanged(false);
       Serial.println(error);
       return false;
@@ -753,13 +837,14 @@ struct AtechWifiOtaPortal::Impl {
       if (server) { delete server; server = nullptr; }
       if (dns) { delete dns; dns = nullptr; }
       WiFi.softAPdisconnect(true);
-      WiFi.mode(WIFI_OFF);
+      releaseRadio();
       if (config.modeChanged) config.modeChanged(false);
       Serial.println(error);
       return false;
     }
 
     configureRoutes();
+    configureWifiRoutes();
     if (!dns->start(DNS_PORT, "*", AP_IP)) {
       Serial.println(F("Warning: captive DNS did not start; use http://192.168.4.1 directly"));
     }
@@ -799,7 +884,7 @@ struct AtechWifiOtaPortal::Impl {
       dns = nullptr;
     }
     WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
+    releaseRadio();
     active = false;
     stopAtMs = 0;
     postUpdateBoot = false;
@@ -949,4 +1034,9 @@ const String &AtechWifiOtaPortal::ssid() const {
 const String &AtechWifiOtaPortal::lastError() const {
   static const String empty;
   return _impl ? _impl->error : empty;
+}
+
+const String &AtechWifiOtaPortal::otaToken() const {
+  static const String empty;
+  return _impl ? _impl->otaToken : empty;
 }

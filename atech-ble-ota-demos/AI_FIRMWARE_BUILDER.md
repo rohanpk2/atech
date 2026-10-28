@@ -1,6 +1,6 @@
 # AI Firmware Builder
 
-Type what the board should do, click **Build firmware**, review the generated C++, click **Deploy to device**, and the ESP32-S3 runs the new logic after a wireless update. Both demos share one backend and one builder card; only the OTA transport differs (Demo 1: Atech custom GATT, Demo 2: gb88 BLEOTA).
+Type what the board should do, click **Generate firmware**, review the generated C++, click **Deploy**, and the ESP32-S3 runs the new logic after a wireless update. Both demos share one backend, one builder card and one deployment panel. Deployment prefers **Wi-Fi** (the backend streams the image to the board over the LAN; see [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md)), falls back to the demo's **Bluetooth** protocol (Demo 1: Atech custom GATT, Demo 2: gb88 BLEOTA) and, last, to the board hotspot portal.
 
 **Verification status (2026-10-27):** every firmware environment compiles, all automated tests pass, and the acceptance prompt was generated, compiled and validated end to end for both demos through the real backend. **No ESP32-S3 board was attached during this work, so nothing below has been flashed, deployed over BLE or Wi-Fi, rebooted, rolled back or put into safe mode on hardware.** See the table at the end.
 
@@ -28,8 +28,8 @@ Before the first wireless deploy a board needs the current base image once over 
 1. **Connect** (Chrome, Web Bluetooth). The dashboard reads the board's identity: device ID `ATECH-<12 hex MAC>`, six-character pairing code (also the suffix of the BLE name `Atech-Custom-OTA-<code>` / `Atech-Library-OTA-<code>` and of the Wi-Fi hotspot `Atech-OTA-D1-<code>` / `Atech-OTA-D2-<code>`), running build, app name and state. Connecting first binds the build to that board.
 2. **Build firmware.** The backend sends the prompt plus the application API header to the model, runs the static policy on the returned file, compiles it with PlatformIO in an isolated workspace, feeds compiler errors or policy violations back for up to three repair rounds, then validates the image. Progress streams to the card (SSE with polling fallback).
 3. **Review.** The generated `user_app.cpp`, the model's summary, diagnostics and the build id are shown. Nothing has touched the board yet.
-4. **Deploy to device.** Enabled only when a build is ready, a board is connected, the build's demo matches the board's demo, the build is unbound or bound to this board, and the image fits the slot size the board reports. The transfer uses the demo's existing OTA protocol.
-5. **Verify.** After the reboot the dashboard reconnects to the same device and checks: same device ID, the identity reports the expected build id, the app loop counter increases (the generated code is executing), an echo challenge is answered, and only then sends **confirm**, which cancels the bootloader rollback. The card shows the checks it passed. A failed check leaves the image pending; a reset then boots the previous firmware.
+4. **Deploy.** Enabled when a build is ready. The deployment panel picks Wi-Fi when the selected board is paired and reachable, Bluetooth when Web Bluetooth has a connected board, otherwise it downloads the file for the hotspot portal; any available method can be forced. The build's demo must match the board's demo, the build must be unbound or bound to this board, and the image must fit the slot size the board reports.
+5. **Verify.** Over Wi-Fi the backend, over Bluetooth the dashboard, waits for the reboot and checks: same device ID, the identity reports the expected build id, the app loop counter increases (the generated code is executing), an authenticated echo is answered, and only then sends **confirm**, which cancels the bootloader rollback. The panel shows the checks it passed and the transfer, reboot and verification times. A failed check leaves the image pending; a reset then boots the previous firmware. A failed Wi-Fi transfer is reported with the next available method offered; nothing switches transports by itself.
 
 The acceptance prompt "Make the onboard LED blink three times quickly, pause for two seconds, and repeat." produced, on both demos, a file whose `appLoop()` runs a three-iteration loop of `led.set` / `delay(120..150)` / `led.off` followed by `delay(2000)`. No dashboard command was involved; the LED commands remain separate opcodes that the core executes.
 
@@ -72,7 +72,7 @@ Demo 1 keeps its original command service and opcodes `0x01` to `0x05` unchanged
 
 ## Safari, iPhone and the Wi-Fi path
 
-Safari has no Web Bluetooth and no Web Serial. The builder still works there; the result card offers **Download firmware.bin** instead of Deploy. Pairing and upload are then manual, exactly as before: hold BOOT for three seconds, join the board's hotspot, open `http://192.168.4.1`, enter the portal token and upload the file. Nothing in this project pairs with the hotspot or deploys from a phone automatically, and the dashboards say so. On an iPhone, download the file while on the normal Wi-Fi (run the backend with `--host 0.0.0.0` and use the LAN URL it prints) or AirDrop it, save it to Files, then join the hotspot; see `WIFI_OTA_TESTING.md`.
+Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need either: the dashboard talks only to the builder backend (same origin), and the backend talks to the board. On an iPhone or iPad open the LAN link the backend prints when started with `--host 0.0.0.0` (it carries the dashboard key). If the board is not on Wi-Fi yet, the hotspot steps on the dashboard set it up; the manual file upload on the hotspot page remains available as the last resort, exactly as before.
 
 ## USB installer
 
@@ -90,6 +90,9 @@ Safari has no Web Bluetooth and no Web Serial. The builder still works there; th
 | `GET /api/builds/:id/events` | SSE stream of job updates, ends with `event: done` |
 | `GET /api/builds/:id/firmware.bin` | the validated image (only when `ready`) |
 | `POST /api/builds/:id/deployed` | record a deployment result for the audit trail |
+| `POST /api/builds/:id/deploy` `{deviceId}` | start a Wi-Fi deployment to a paired board (202 with `id`) |
+| `GET /api/deployments`, `/:id`, `/:id/events`; `POST /:id/abort` | deployment state, SSE stream, abort |
+| `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/:id/probe`, `/:id/control`; `DELETE /:id` | device registry (see WIFI_LAN_OTA.md) |
 | `GET /api/installer/:demo/manifest.json`, `/parts/:name`, `/status`; `POST /api/installer/:demo/build` | ESP Web Tools |
 
 Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend has no authentication and binds to 127.0.0.1 by default.
@@ -109,5 +112,6 @@ Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cp
 | `pio run` for base, updated and ai, both demos | Verified on this machine |
 | Backend, browser-module and dashboard tests | Verified (`npm test`, the per-demo `node` tests) |
 | Model generation, policy, compile, image validation for the acceptance prompt | Verified for Demo 1 (first attempt, 28 s) and Demo 2 (first attempt, 149 s including the workspace's first full compile) using the `claude` CLI provider |
-| USB install, BLE connect, identity read, BLE OTA (either protocol), reboot, post-reboot verification, confirm, rollback, safe mode, Wi-Fi portal with an AI image, ESP Web Tools flash | **Not verified: no board was attached** |
+| Wi-Fi deployment protocol, progress, interruption, replay and wrong-device handling | Verified against the simulated board (`builder/test/lan.test.js`) and in Chrome against the simulated board; **not on hardware** |
+| USB install, BLE connect, identity read, BLE OTA (either protocol), Wi-Fi join, mDNS, LAN OTA, reboot, post-reboot verification, confirm, rollback, safe mode, Wi-Fi portal with an AI image, ESP Web Tools flash | **Not verified: no board was attached** |
 | Dashboards in a real Chrome session | Not verified in Chrome; verified in jsdom and by route checks against the running backend |

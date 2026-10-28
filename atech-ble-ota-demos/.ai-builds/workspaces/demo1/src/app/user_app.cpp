@@ -1,27 +1,21 @@
 #include <AtechApp.h>
 
-static const uint8_t kBright = 60;
-static const int kFlashOnMs = 60;
-static const int kFlashOffMs = 60;
-static const int kGroupGapMs = 120;
-
-static void flashTwice(uint8_t r, uint8_t g, uint8_t b) {
-  for (int i = 0; i < 2; ++i) {
-    atech::led.set(r, g, b);
-    delay(kFlashOnMs);
-    atech::led.off();
-    delay(kFlashOffMs);
-  }
-}
+static const uint8_t kBrightness = 40;
+static const unsigned long kOnMs = 150;
+static const unsigned long kOffMs = 150;
+static const unsigned long kPauseMs = 2000;
 
 void appSetup() {
-  atech::log("Police strobe started");
-  atech::led.off();
+  led.off();
+  atech::log("Triple blink app started");
 }
 
 void appLoop() {
-  flashTwice(kBright, 0, 0);
-  delay(kGroupGapMs);
-  flashTwice(0, 0, kBright);
-  delay(kGroupGapMs);
+  for (int i = 0; i < 3; ++i) {
+    led.set(kBrightness, kBrightness, kBrightness);
+    delay(kOnMs);
+    led.off();
+    delay(kOffMs);
+  }
+  delay(kPauseMs);
 }

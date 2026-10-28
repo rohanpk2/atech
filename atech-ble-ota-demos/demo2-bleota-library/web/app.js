@@ -34,7 +34,6 @@ let pendingOtaVerification = null;
 let selectedFileValid = false;
 let builder = null;
 const bluetoothAvailable = window.isSecureContext && Boolean(navigator.bluetooth);
-let selectedTransport = bluetoothAvailable ? 'ble' : 'wifi';
 const pendingControls = new Map();
 
 function delay(milliseconds) {
@@ -106,35 +105,9 @@ function validateEsp32S3Application(bytes) {
   }
 }
 
-function selectTransport(transport) {
-  if (transport === 'ble' && !bluetoothAvailable) return;
-  if (transferring) {
-    log('Finish or abort the active Bluetooth transfer before changing transports.', 'BROWSER', 'warn');
-    return;
-  }
-  if (transport === 'wifi' && isConnected()) {
-    $('compatibility').hidden = false;
-    $('compatibility').textContent = 'Disconnect the active Bluetooth session before starting the exclusive Wi-Fi OTA mode.';
-    $('disconnect').focus();
-    return;
-  }
-  selectedTransport = transport;
-  document.body.dataset.otaTransport = transport;
-  const usingBluetooth = transport === 'ble';
-  $('useBluetooth').classList.toggle('selected', usingBluetooth);
-  $('useBluetooth').setAttribute('aria-pressed', String(usingBluetooth));
-  $('useWifi').classList.toggle('selected', !usingBluetooth);
-  $('useWifi').setAttribute('aria-pressed', String(!usingBluetooth));
-  $('wifiTransportPanel').hidden = usingBluetooth;
-  $('bleConsole').hidden = !usingBluetooth;
-  refreshButtons();
-}
-
 function refreshButtons() {
   const connected = isConnected();
-  $('useBluetooth').disabled = transferring || !bluetoothAvailable;
-  $('useWifi').disabled = transferring;
-  $('connect').disabled = transferring || connected || selectedTransport !== 'ble' || !bluetoothAvailable;
+  $('connect').disabled = transferring || connected || !bluetoothAvailable;
   $('disconnect').disabled = transferring || !connected;
   $('testConnection').disabled = transferring || !connected || !identityControlChar;
   $('bin').disabled = transferring;
@@ -153,18 +126,9 @@ function clearGattHandles() {
 }
 
 function renderIdentity() {
-  if (!currentIdentity) {
-    $('deviceId').textContent = 'Unknown';
-    $('pairingCode').textContent = 'Unknown';
-    $('appInfo').textContent = 'Unknown';
-    return;
-  }
-  $('deviceId').textContent = currentIdentity.id;
-  $('pairingCode').textContent = currentIdentity.suffix;
-  let appText = `${currentIdentity.app} v${currentIdentity.ver} (build ${currentIdentity.build}, ${currentIdentity.appState})`;
-  if (currentIdentity.safe) appText += ', SAFE MODE';
-  if (currentIdentity.pending) appText += ', pending confirmation';
-  $('appInfo').textContent = appText;
+  // The shared builder module renders the device panel from the LAN registry
+  // and this BLE identity; nothing to do here beyond a refresh.
+  if (builder) builder.refresh();
 }
 
 function rejectWaiters(error) {
@@ -192,9 +156,9 @@ function handleDisconnect(event) {
   rejectWaiters(new Error('Bluetooth disconnected'));
   stopHeartbeat();
   clearGattHandles();
-  setConnectionState('offline', 'Disconnected');
+  setConnectionState('offline', 'Bluetooth off');
   setSignalState('offline', 'None');
-  $('deviceName').textContent = device?.name || 'Previously selected device';
+  if (builder) builder.refresh();
   log('GATT connection closed.', 'BROWSER', otaPhase === 'rebooting' || otaPhase === 'verifying' ? 'info' : 'warn');
   if (otaPhase === 'uploading') {
     setOtaState('Transfer interrupted. The previous firmware should remain active; reconnect and retry.', 'error', 'Interrupted');
@@ -362,7 +326,7 @@ async function connectGatt() {
         'BROWSER', 'warn');
   }
 
-  $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
+  if (!currentIdentity) $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
   setConnectionState('online', 'Connected');
   setSignalState('waiting', 'Waiting');
   log(`BLEOTA service ready on ${device.name || 'ESP32-S3'}` +
@@ -474,9 +438,10 @@ async function finishOtaVerification() {
   log(`Post-reboot verification passed, ${currentIdentity.fw}, echo ${echo.latencyMs.toFixed(1)} ms.`, 'ESP32 ACK', 'success');
 }
 
-async function reconnectAndVerifyOta() {
+async function reconnectAndVerifyOta(onPhase) {
   await waitForBoardDisconnect();
   otaPhase = 'verifying';
+  if (onPhase) onPhase('verifying');
   setOtaState('Board reboot detected. Reconnecting and verifying the running build…', 'working', 'Verifying');
   const deadline = performance.now() + 30000;
   let lastError = new Error('ESP32 has not advertised after reboot');
@@ -584,10 +549,12 @@ async function deployBytes(bytes, meta = {}) {
       sent += sectors[index].length;
       index += 1;
       updateProgress(sent, bytes.length, startedAt);
+      if (meta.onProgress) meta.onProgress({bytes: sent, total: bytes.length, startedAt});
       if (index % 32 === 0) log(`${formatBytes(sent)} acknowledged sector by sector.`, 'ESP32 ACK');
     }
 
     setOtaState('Sending BLEOTA STOP; the ESP32 finalises and verifies the image…', 'working', 'Validating');
+    if (meta.onPhase) meta.onPhase('validating');
     const stopAck = waitForCommandAck(30000);
     stopAck.catch(() => {});
     await cmdChar.writeValueWithResponse(BLEOTA.buildStopFrame());
@@ -602,7 +569,8 @@ async function deployBytes(bytes, meta = {}) {
                               fileName: label, buildId: meta.buildId || null};
     otaPhase = 'rebooting';
     setOtaState('Image accepted by the ESP32. Waiting for the reboot. The update is not yet verified.', 'working', 'Rebooting');
-    await reconnectAndVerifyOta();
+    if (meta.onPhase) meta.onPhase('rebooting');
+    await reconnectAndVerifyOta(meta.onPhase);
     return {identity: currentIdentity, firmwareInfo: currentFirmwareVersion};
   } catch (error) {
     log(error.message, 'BROWSER', 'error');
@@ -674,15 +642,12 @@ $('testConnection').addEventListener('click', async () => { try { await runChall
 $('bin').addEventListener('change', validateSelectedFile);
 $('deploy').addEventListener('click', async () => { try { await deploy(); } catch (_) {} });
 $('clearLog').addEventListener('click', () => { $('log').replaceChildren(); log('Activity log cleared.'); });
-$('useBluetooth').addEventListener('click', () => selectTransport('ble'));
-$('useWifi').addEventListener('click', () => selectTransport('wifi'));
-
 if (!bluetoothAvailable) {
   $('compatibility').hidden = false;
   $('compatibility').textContent = !window.isSecureContext
-    ? 'Web Bluetooth requires HTTPS or http://localhost. Wi-Fi fallback is selected and does not require Web Bluetooth.'
-    : 'This browser does not expose Web Bluetooth. Wi-Fi fallback is selected for Safari and other unsupported browsers.';
-  $('useBluetooth').disabled = true;
+    ? 'Web Bluetooth requires HTTPS or http://localhost, so the Bluetooth backup is unavailable here. Wi-Fi deployment through the builder backend does not need it.'
+    : 'This browser does not expose Web Bluetooth (Safari). Wi-Fi deployment through the builder backend works here; Bluetooth is unavailable as a backup.';
+  $('connect').disabled = true;
 }
 
 // Transport handed to the shared AI firmware builder card.
@@ -696,11 +661,10 @@ window.AtechDemo2Transport = {
   control: opcode => sendControl(opcode),
 };
 
-setConnectionState('offline', 'Disconnected');
+setConnectionState('offline', 'Bluetooth off');
 setSignalState('offline', 'None');
 setOtaState('Connect an ESP32-S3 running the Demo 2 image, then build with the AI card or choose a firmware.bin.', 'neutral', 'Ready');
 renderIdentity();
-selectTransport(selectedTransport);
 log('Dashboard ready. gb88 BLEOTA transport with Atech identity verification; nothing counts as success without the board reporting the new build.');
 if (globalThis.AtechBuilder) {
   builder = AtechBuilder.mount({demo: 2, transport: window.AtechDemo2Transport, log});

@@ -1,6 +1,14 @@
-# Atech ESP32-S3: Bluetooth OTA with Wi-Fi browser fallback
+# Atech ESP32-S3: Wi-Fi primary OTA, Bluetooth fallback, AI firmware builder
 
-**Status:** both demos provide their original Bluetooth OTA path plus an independent, device-hosted Wi-Fi SoftAP portal in the `base` and `updated` images, and now an **AI firmware builder**: type a prompt in either dashboard, the backend generates a sandboxed C++ app with Claude, compiles it with PlatformIO, validates the image, and deploys it over that demo's BLE OTA protocol after you review the code. See [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md). **No BLE or Wi-Fi transfer has been verified on physical ESP32-S3 hardware in this environment.** Successful compilation, browser unit tests and backend end-to-end generation are not hardware results; use [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) for the required matrix.
+**Status (2026-10-28):** both demos now deploy **over the user's own Wi-Fi network by default**, with their original Bluetooth OTA protocols as the backup and the device-hosted hotspot portal as the last resort. The builder backend streams the validated image to the board over an HMAC-authenticated LAN service, which works from Safari and Chrome without Web Bluetooth. See [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md) for provisioning, deployment, security, browser compatibility, migration and the test record. The AI firmware builder is described in [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md). **No BLE or Wi-Fi transfer has been verified on physical ESP32-S3 hardware in this environment.** Successful compilation, browser tests, backend tests against a simulated board and end-to-end generation are not hardware results; use [WIFI_OTA_TESTING.md](WIFI_OTA_TESTING.md) and [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md) section 10 for the hardware procedure.
+
+## The intended experience
+
+1. Power the ESP32-S3 from a wall charger or power bank.
+2. Once: hold BOOT, join the board hotspot, open `http://192.168.4.1`, enter the OTA authorization code and join your 2.4 GHz home Wi-Fi.
+3. Open the Atech dashboard in Safari or Chrome; **Find devices** shows the board; **Pair** it with the same code.
+4. Type what the board should do, click **Generate firmware**, read the generated C++.
+5. Click **Deploy**. Wi-Fi is used when the board is reachable; the panel shows percentage, KiB/s, time remaining, reboot and verification. Bluetooth and the hotspot remain selectable.
 
 ## AI firmware builder (both demos)
 
@@ -33,9 +41,11 @@ These are implementation families rather than five mutually exclusive radio tech
 - `demo1-custom-gatt/`: **First demo.** Atech-owned HTML/JS dashboard + PlatformIO project + self-defined GATT protocol. It provides safe LED/status commands, matched ESP32 acknowledgments, random-nonce connection proofs, and a real OTA path. It rejects non-ESP32-S3/non-application images in the browser, validates CRC32 before activating the OTA slot, and uses a stop-and-wait ACK after every flash write. `src/app/user_app.cpp` holds the stock blink app the AI builder replaces.
 - `demo2-bleota-library/`: **Second demo.** PlatformIO project pinned to the upstream `gb88/BLEOTA` v1.0.6 Git tag. Its new `web/` dashboard speaks the gb88 protocol from an independent client (`bleota-client.js`) and adds identity, verification and the AI builder; gb88's maintained page at https://gb88.github.io/BLEOTA/ still works against the same firmware. The protocol handles 4KB sectors, CRC16, retries, and optional signing (left disabled).
 - `shared/AtechCore/`: the protected firmware core used by both demos: device ID and pairing code, identity GATT service, sandboxed app task, LED and GPIO guards, rollback confirmation and safe mode. Generated code only sees `AtechApp.h`.
-- `shared/AtechWifiOta/`: shared SoftAP, authenticated local portal, streaming IDF OTA writer, validation, timeout, and post-reboot verification support used by all firmware builds.
+- `shared/AtechWifiOta/`: shared SoftAP, authenticated local portal (now with the home Wi-Fi provisioning card), streaming IDF OTA writer, validation, timeout, and post-reboot verification support used by all firmware builds.
+- `shared/AtechWifiLan/`: station-mode Wi-Fi, mDNS and the HMAC-authenticated LAN OTA service that the builder backend deploys through. See [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md).
 - `builder/`: the Node backend of the AI firmware builder (model access, policy, isolated PlatformIO workspaces, image validation, job API, ESP Web Tools installer) that also serves both dashboards. `web-shared/` holds the builder card and identity protocol used by both.
 - `AI_FIRMWARE_BUILDER.md`: how the builder works, what generated code may do, the identity and recovery protocol, and what has and has not been physically verified.
+- `WIFI_LAN_OTA.md`: Wi-Fi provisioning, LAN deployment protocol and security review, Safari/Chrome compatibility, performance expectations, migration and the automated test record.
 - `WIFI_OTA_TESTING.md`: exact USB, BLE, macOS/iPhone Safari, Chrome, interruption, rejection, and recovery procedures.
 
 **One-time USB installation is required for each demo's baseline firmware.** Thereafter `base -> updated` can run over Bluetooth or Wi-Fi. To change between demos, USB-flash the other demo baseline.
@@ -185,8 +195,10 @@ node web/bleota-client.test.js
 node web/dashboard.test.js
 
 cd ../web-shared && node atech-identity.test.js && node atech-builder.test.js
-cd ../builder && npm test
+cd ../builder && npm test     # includes the LAN OTA, device registry, routes and jsdom deployment tests
 ```
+
+To try the whole Wi-Fi flow without a board, start the backend with `ATECH_SIMULATED_DEVICE=all npm start`; two simulated boards (clearly labelled) register themselves and accept deployments with the real protocol. They prove nothing about ESP32 radio or flash speed.
 
 The `ai` environment is the one the builder compiles inside its isolated workspace; it is never uploaded over USB.
 
