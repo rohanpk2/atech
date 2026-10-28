@@ -1,13 +1,21 @@
 #include <AtechApp.h>
 
+static const int kBlinkCount = 3;
+static const unsigned long kOnMs = 150;
+static const unsigned long kOffMs = 150;
+static const unsigned long kPauseMs = 2000;
+
 void appSetup() {
-  atech::log("Green blink app started: 2 blinks per second");
-  atech::led.off();
+  led.off();
+  atech::log("Triple blink app started");
 }
 
 void appLoop() {
-  atech::led.set(0, 40, 0);
-  delay(250);
-  atech::led.off();
-  delay(250);
+  for (int i = 0; i < kBlinkCount; ++i) {
+    led.set(40, 40, 40);
+    delay(kOnMs);
+    led.off();
+    delay(kOffMs);
+  }
+  delay(kPauseMs);
 }

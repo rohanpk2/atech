@@ -1,0 +1,74 @@
+{
+  "id": "515792859cff",
+  "demo": 1,
+  "prompt": "Fade the LED from off to purple and back over three seconds, forever.",
+  "deviceId": "ATECH-90DA724FC608",
+  "state": "ready",
+  "stage": "Ready to deploy",
+  "attempt": 1,
+  "maxRepairs": 3,
+  "buildId": "031523ff",
+  "appName": "Purple breathing fade",
+  "appVersion": 8,
+  "summary": "Smoothly fades the onboard LED from off up to purple and back down to off. Each full cycle takes three seconds and repeats forever, using a cosine curve so the fade looks even.",
+  "code": "#include <AtechApp.h>\n#include <math.h>\n\n// Peak purple colour (comfortable brightness)\nstatic const float PEAK_R = 48.0f;\nstatic const float PEAK_G = 0.0f;\nstatic const float PEAK_B = 64.0f;\n\nstatic const int HALF_MS = 1500;   // 1.5 s up, 1.5 s down = 3 s cycle\nstatic const int STEP_MS = 20;\nstatic const int STEPS = HALF_MS / STEP_MS;  // 75 steps per half\n\nstatic bool rising = true;\n\nstatic void showLevel(float level) {\n  if (level < 0.0f) level = 0.0f;\n  if (level > 1.0f) level = 1.0f;\n  uint8_t r = (uint8_t)lroundf(PEAK_R * level);\n  uint8_t g = (uint8_t)lroundf(PEAK_G * level);\n  uint8_t b = (uint8_t)lroundf(PEAK_B * level);\n  if (r == 0 && g == 0 && b == 0) {\n    led.off();\n  } else {\n    led.set(r, g, b);\n  }\n}\n\nvoid appSetup() {\n  led.off();\n  atech::log(\"Purple breathing fade started\");\n}\n\nvoid appLoop() {\n  // One half of the cycle per pass: rising, then falling.\n  for (int i = 0; i <= STEPS; ++i) {\n    float t = (float)i / (float)STEPS;            // 0..1\n    float eased = 0.5f - 0.5f * cosf((float)M_PI * t);  // smooth 0..1\n    float level = rising ? eased : (1.0f - eased);\n    showLevel(level);\n    if (i < STEPS) delay(STEP_MS);\n  }\n  rising = !rising;\n}\n",
+  "diagnostics": [],
+  "violations": [],
+  "logTail": "DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)\nPACKAGES: \n - framework-arduinoespressif32 @ 4.30312.261016 (3.3.12) \n - framework-arduinoespressif32-esp32s3-libs @ 3.3.12 \n - tool-esptool @ 2.50400.0 (5.4.0) \n - tool-riscv32-esp-elf-gdb @ 12.1.0+20221002 \n - tool-xtensa-esp-elf-gdb @ 12.1.0+20221002 \n - toolchain-riscv32-esp @ 14.2.0+20260121 \n - toolchain-xtensa-esp-elf @ 14.2.0+20260121\nLDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf\nLDF Modes: Finder ~ chain, Compatibility ~ soft\nFound 48 compatible libraries\nScanning dependencies...\nDependency Graph\n|-- Adafruit NeoPixel @ 1.15.5\n|-- AtechCore @ 1.1.0\n|-- AtechWifiLan @ 1.0.0\n|-- AtechWifiOta @ 1.0.0\n|-- BLE @ 3.3.12\n|-- Update @ 3.3.12\nBuilding in release mode\nCompiling .pio/build/ai/src/app/user_app.cpp.o\nCompiling .pio/build/ai/src/main.cpp.o\nLinking .pio/build/ai/firmware.elf\nRetrieving maximum program size .pio/build/ai/firmware.elf\nChecking size .pio/build/ai/firmware.elf\nAdvanced Memory Usage is available via \"PlatformIO Home > Project Inspect\"\nRAM:   [==        ]  15.8% (used 51684 bytes from 327680 bytes)\nFlash: [==        ]  24.2% (used 1523891 bytes from 6291456 bytes)\nBuilding .pio/build/ai/firmware.bin\nesptool v5.4.0\nCreating ESP32-S3 image...\nMerged 3 ELF sections.\nSuccessfully created ESP32-S3 image.\n========================= [SUCCESS] Took 12.10 seconds =========================\n\nEnvironment    Status    Duration\n-------------  --------  ------------\nai             SUCCESS   00:00:12.104\n========================= 1 succeeded in 00:00:12.104 =========================",
+  "firmware": {
+    "size": 1561856,
+    "crc32": "4d8820be",
+    "sha256": "ae4eae57ad847e5a317bf276c83396695ed28aada42300694125a213726d1feb",
+    "path": "/Users/rohan/Projects/atech/atech-ble-ota-demos/.ai-builds/jobs/515792859cff/firmware.bin"
+  },
+  "error": null,
+  "createdAt": "2026-10-28T21:20:18.376Z",
+  "updatedAt": "2026-10-28T21:21:10.616Z",
+  "provider": "anthropic",
+  "model": "claude-opus-5-5",
+  "deployments": [
+    {
+      "deviceId": "ATECH-90DA724FC608",
+      "result": "verified",
+      "detail": "board ATECH-90DA724FC608 reachable at 172.20.10.8:8080; Demo 1 matches; image fits the 6291456-byte slot; board verified SHA-256 ae4eae57ad84 and the ESP image; device ATECH-90DA724FC608 matched after reboot; build 031523ff running (app \"Purple breathing fade\" v8); app loop ran 1 times in the verification window; authenticated echo answered; boot confirmed, rollback cancelled",
+      "transport": "wifi",
+      "at": "2026-10-28T21:21:10.616Z"
+    }
+  ],
+  "usage": [
+    {
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 2599,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "iterations": [
+          {
+            "input_tokens": 2599,
+            "output_tokens": 1023,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "type": "message",
+            "model": null
+          }
+        ],
+        "output_tokens": 1023,
+        "output_tokens_details": {
+          "thinking_tokens": 276
+        },
+        "service_tier": "standard",
+        "inference_geo": "global",
+        "speed": "standard"
+      },
+      "costUsd": null
+    }
+  ]
+}
