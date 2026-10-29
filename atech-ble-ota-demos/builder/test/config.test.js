@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {loadDotEnv} = require('../lib/config');
+const {loadConfig, loadDotEnv} = require('../lib/config');
 
 function tempEnvFile(text) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atech-env-'));
@@ -39,4 +39,29 @@ test('loadDotEnv defaults to builder/.env', () => {
   // Resolve the default without reading it: a missing file must still return false.
   const builderDir = path.resolve(__dirname, '..');
   assert.equal(path.resolve(loadDotEnv.defaultFile), path.join(builderDir, '.env'));
+});
+
+test('loadConfig honours PLATFORMIO_CORE_DIR for the pio binary and boot_app0', () => {
+  const core = fs.mkdtempSync(path.join(os.tmpdir(), 'atech-pio-core-'));
+  assert.equal(loadConfig({PLATFORMIO_CORE_DIR: core}).pio, 'pio', 'no penv yet: fall back to PATH');
+  fs.mkdirSync(path.join(core, 'penv', 'bin'), {recursive: true});
+  fs.writeFileSync(path.join(core, 'penv', 'bin', 'pio'), '');
+  const config = loadConfig({PLATFORMIO_CORE_DIR: core});
+  assert.equal(config.pio, path.join(core, 'penv', 'bin', 'pio'));
+  assert.equal(config.bootApp0, path.join(core, 'packages', 'framework-arduinoespressif32', 'tools', 'partitions', 'boot_app0.bin'));
+  assert.equal(loadConfig({PLATFORMIO_CORE_DIR: core, PLATFORMIO_BIN: '/usr/bin/pio'}).pio, '/usr/bin/pio');
+  fs.rmSync(core, {recursive: true, force: true});
+});
+
+test('loadConfig falls back to the home directory PlatformIO core when PLATFORMIO_CORE_DIR is unset', () => {
+  const config = loadConfig({});
+  assert.equal(config.bootApp0, path.join(os.homedir(), '.platformio', 'packages', 'framework-arduinoespressif32', 'tools', 'partitions', 'boot_app0.bin'));
+});
+
+test('loadConfig parses ATECH_PIO_JOBS and ignores nonsense', () => {
+  assert.equal(loadConfig({}).pioJobs, null);
+  assert.equal(loadConfig({ATECH_PIO_JOBS: '2'}).pioJobs, 2);
+  assert.equal(loadConfig({ATECH_PIO_JOBS: '0'}).pioJobs, null);
+  assert.equal(loadConfig({ATECH_PIO_JOBS: 'lots'}).pioJobs, null);
+  assert.equal(loadConfig({ATECH_PIO_JOBS: '1.5'}).pioJobs, null);
 });

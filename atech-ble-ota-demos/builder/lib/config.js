@@ -9,10 +9,23 @@ const util = require('node:util');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 
+// PlatformIO's core directory: PLATFORMIO_CORE_DIR (the variable PlatformIO itself honours),
+// else ~/.platformio. Containers install the toolchain somewhere other than a home directory.
+function pioCoreDir(env) {
+  return env.PLATFORMIO_CORE_DIR ? path.resolve(env.PLATFORMIO_CORE_DIR) : path.join(os.homedir(), '.platformio');
+}
+
 function findPio(env) {
   if (env.PLATFORMIO_BIN) return env.PLATFORMIO_BIN;
-  const penv = path.join(os.homedir(), '.platformio', 'penv', 'bin', 'pio');
+  const penv = path.join(pioCoreDir(env), 'penv', 'bin', 'pio');
   return fs.existsSync(penv) ? penv : 'pio';
+}
+
+// Parallel SCons jobs for `pio run` (ATECH_PIO_JOBS); null leaves PlatformIO's default (CPU count).
+// Small servers set 1 so a single compile cannot exhaust memory.
+function pioJobs(env) {
+  const jobs = Number(env.ATECH_PIO_JOBS);
+  return Number.isInteger(jobs) && jobs > 0 ? jobs : null;
 }
 
 function demoEntry(demo, key, name, imageIdentity, blePrefix, ssidPrefix, otaProtocol) {
@@ -58,7 +71,8 @@ function loadConfig(env = process.env) {
     slotSize: 0x600000,
     sizeMargin: 64 * 1024,
     pio: findPio(env),
-    bootApp0: path.join(os.homedir(), '.platformio', 'packages', 'framework-arduinoespressif32',
+    pioJobs: pioJobs(env),
+    bootApp0: path.join(pioCoreDir(env), 'packages', 'framework-arduinoespressif32',
                         'tools', 'partitions', 'boot_app0.bin'),
     model: env.ATECH_LLM_MODEL || 'claude-opus-5-5',
     maxRepairs: Number.isFinite(Number(env.ATECH_MAX_REPAIRS)) && env.ATECH_MAX_REPAIRS !== undefined

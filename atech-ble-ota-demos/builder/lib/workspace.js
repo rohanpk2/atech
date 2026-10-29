@@ -79,7 +79,7 @@ async function compileWorkspace(demo, dir, {config = loadConfig(), onLine, timeo
   const firmwarePath = path.join(dir, '.pio', 'build', 'ai', 'firmware.bin');
   // Never let a previous job's artifact survive a failed link.
   await fsp.rm(firmwarePath, {force: true});
-  const result = await runPio(['run', '-e', 'ai'], {cwd: dir, onLine, timeoutMs, pioBin: config.pio});
+  const result = await runPio(['run', '-e', 'ai'], {cwd: dir, onLine, timeoutMs, pioBin: config.pio, jobs: config.pioJobs ?? null});
   const diagnostics = parseDiagnostics(result.log);
   const ok = result.code === 0 && fs.existsSync(firmwarePath);
   return {ok, code: result.code, timedOut: result.timedOut, log: result.log, diagnostics,

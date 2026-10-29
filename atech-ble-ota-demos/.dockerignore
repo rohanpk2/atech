@@ -1,0 +1,16 @@
+# Build context for deploy/Dockerfile is this directory (atech-ble-ota-demos/).
+# Keep local artifacts, caches and secrets out of the image.
+**/node_modules
+**/.pio
+**/.env
+**/.env.*
+!**/.env.example
+.ai-builds
+**/.DS_Store
+**/*.code-workspace
+.git
+.gitignore
+docs
+*.md
+!builder/prompts/system.md
+benchmark-results.csv

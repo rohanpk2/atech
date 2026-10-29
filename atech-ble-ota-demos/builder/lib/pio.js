@@ -16,10 +16,14 @@ function stripAnsi(text) {
   return text.replace(ANSI, '');
 }
 
-function runPio(args, {cwd, env = {}, timeoutMs = 600000, onLine, pioBin} = {}) {
-  const bin = pioBin || loadConfig().pio;
+function runPio(args, {cwd, env = {}, timeoutMs = 600000, onLine, pioBin, jobs} = {}) {
+  const config = pioBin && jobs !== undefined ? null : loadConfig();
+  const bin = pioBin || config.pio;
+  // `pio run -j N` bounds the parallel compiles; other subcommands do not accept it.
+  const parallel = jobs === undefined ? config.pioJobs : jobs;
+  const argv = args[0] === 'run' && Number.isInteger(parallel) && parallel > 0 ? [...args, '-j', String(parallel)] : args;
   const run = () => new Promise((resolve, reject) => {
-    const child = spawn(bin, args, {
+    const child = spawn(bin, argv, {
       cwd,
       env: {...process.env, PLATFORMIO_DISABLE_PROGRESSBAR: 'true', PLATFORMIO_NO_ANSI: 'true', ...env},
       stdio: ['ignore', 'pipe', 'pipe'],

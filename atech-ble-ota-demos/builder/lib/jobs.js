@@ -27,14 +27,26 @@ function crc32(buf) {
   return ((crc ^ 0xFFFFFFFF) >>> 0).toString(16).padStart(8, '0');
 }
 
+// One operator-facing line per state change, for the server log.
+function describeTransition(job) {
+  let detail = '';
+  if (job.state === 'ready' && job.firmware) detail = `: ${job.firmware.size} bytes, crc32 ${job.firmware.crc32}`;
+  else if (job.state === 'failed') detail = `: ${job.error || 'unknown error'}`;
+  else if (job.attempt) detail = ` (attempt ${job.attempt})`;
+  return `job ${job.id} demo ${job.demo} ${job.state}${detail}`;
+}
+
 function defaultReadApiHeader(config) {
   return fs.readFileSync(path.join(config.sharedDir, 'AtechCore', 'src', 'AtechAppApi.h'), 'utf8');
 }
 
 class JobStore {
-  constructor({config = loadConfig(), provider, deps = {}} = {}) {
+  // `log` receives one line per job lifecycle event (queued, generating, compiling, ready,
+  // failed with its reason); the server passes console.log, library users and tests stay silent.
+  constructor({config = loadConfig(), provider, deps = {}, log = () => {}} = {}) {
     this.config = config;
     this.provider = provider;
+    this.log = log;
     this.deps = {
       checkSource,
       validateImage,
@@ -98,6 +110,7 @@ class JobStore {
     this.jobs.set(id, job);
     fs.mkdirSync(path.join(this.jobsDir, id), {recursive: true});
     this.persist(job);
+    this.log(redactSecrets(`job ${id} demo ${demoNumber} queued: "${text.slice(0, 60)}"${text.length > 60 ? '...' : ''}`));
     return this.snapshot(job);
   }
 
@@ -135,6 +148,7 @@ class JobStore {
   update(job, patch) {
     Object.assign(job, patch);
     this.persist(job);
+    if (patch.state !== undefined) this.log(redactSecrets(describeTransition(job)));
     const snapshot = this.snapshot(job);
     for (const fn of this.subscribers.get(job.id) || []) {
       try { fn(snapshot); } catch { /* subscriber errors never break the pipeline */ }

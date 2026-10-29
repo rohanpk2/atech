@@ -1,0 +1,61 @@
+# Atech AI firmware builder on a small server (2 GB RAM). From the repository root:
+#   docker compose -f atech-ble-ota-demos/deploy/compose.yaml up -d --build
+# Secrets and tunables come from /etc/atech/builder.env on the host (ATECH_ENV_FILE overrides the
+# path for local tests). The service is published on loopback only; reach it over an SSH tunnel
+# until a TLS reverse proxy is in front of it (see deploy/README.md).
+name: atech
+
+services:
+  builder:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: atech-builder:local
+    container_name: atech-builder
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: ${ATECH_ENV_FILE:-/etc/atech/builder.env}
+        required: true
+    environment:
+      # Fixed by this file: the backend must listen on all container interfaces for the port
+      # mapping to work, and the builds directory must be the mounted volume.
+      ATECH_BUILDER_HOST: 0.0.0.0
+      ATECH_BUILDER_PORT: "5173"
+      ATECH_BUILDS_DIR: /data/builds
+      NODE_OPTIONS: --max-old-space-size=256
+      # Where the image installed PlatformIO; an env-file value must not move them.
+      PLATFORMIO_CORE_DIR: /home/atech/.platformio
+      PLATFORMIO_BIN: /home/atech/.platformio/penv/bin/pio
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - builds:/data/builds                                # jobs, workspaces, build cache, devices.json, dashboard.key
+      - pio-cache:/home/atech/.platformio/.cache           # PlatformIO download cache
+      - demo1-pio:/app/demo1-custom-gatt/.pio              # Demo 1 base image for the USB installer
+      - demo2-pio:/app/demo2-bleota-library/.pio           # Demo 2 base image for the USB installer
+    # One firmware compile at a time (queued by the backend) with one SCons job (ATECH_PIO_JOBS=1
+    # in the image) fits in 1.5 GB; the linker may spill into swap rather than be killed.
+    mem_limit: 1536m
+    memswap_limit: 3072m
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "/app/deploy/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  builds:
+  pio-cache:
+  demo1-pio:
+  demo2-pio:

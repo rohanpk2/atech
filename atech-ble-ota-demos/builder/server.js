@@ -349,7 +349,7 @@ async function main() {
   if (portIndex >= 0) config.port = Number(args[portIndex + 1]);
 
   const provider = await selectProvider(config);
-  const jobs = new JobStore({config, provider});
+  const jobs = new JobStore({config, provider, log: line => console.log(line)});
   let pioVersion = null;
   try { pioVersion = (await runPio(['--version'], {timeoutMs: 60000, pioBin: config.pio})).log.trim(); }
   catch (error) { console.warn(`PlatformIO not found at ${config.pio}: ${error.message}`); }

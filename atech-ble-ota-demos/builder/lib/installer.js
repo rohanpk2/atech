@@ -62,7 +62,7 @@ async function ensureBaseBuild(demo, {config = loadConfig(), force = false, onLi
   const entry = config.demos[demo];
   if (!entry) throw new Error(`Unknown demo ${demo}`);
   if (!force && !baseBuildIsStale(demo, {config})) return {dir: entry.dir, built: false};
-  const result = await runPio(['run', '-e', 'base'], {cwd: entry.dir, onLine, pioBin: config.pio});
+  const result = await runPio(['run', '-e', 'base'], {cwd: entry.dir, onLine, pioBin: config.pio, jobs: config.pioJobs ?? null});
   if (result.code !== 0) throw new Error(`Base build for demo ${demo} failed (exit ${result.code})`);
   return {dir: entry.dir, built: true, log: result.log};
 }

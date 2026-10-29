@@ -12,6 +12,8 @@ npm install
 npm start
 ```
 
+To run the backend on a server in Docker (DigitalOcean), see [deploy/README.md](deploy/README.md).
+
 Then open **http://localhost:5173/demo1/** or **http://localhost:5173/demo2/** in desktop Chrome. If an older `python3 -m http.server 5173` from the previous README instructions is still running, stop it first; the backend warns when it detects one and you can also open `http://127.0.0.1:5173/`.
 
 Model credentials, checked in this order:
@@ -95,7 +97,7 @@ Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need ei
 | `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/:id/probe`, `/:id/control`; `DELETE /:id` | device registry (see WIFI_LAN_OTA.md) |
 | `GET /api/installer/:demo/manifest.json`, `/parts/:name`, `/status`; `POST /api/installer/:demo/build` | ESP Web Tools |
 
-Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend has no authentication and binds to 127.0.0.1 by default.
+Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend binds to 127.0.0.1 by default and then needs no authentication; on any other address (a phone on the LAN, the Docker deployment) every `/api/*` request must carry the dashboard key, see [deploy/README.md](deploy/README.md).
 
 ## Layout
 

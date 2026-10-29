@@ -135,3 +135,29 @@ test('provider failures are stored as readable errors with secrets redacted', as
     if (previous === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previous;
   }
 });
+
+test('job lifecycle is reported through the log hook with the failure reason and no secrets', async () => {
+  const lines = [];
+  const config = tempConfig();
+  const provider = fakeProvider([ok(), new Error('provider exploded with sk-ant-secret123456 in the message')]);
+  const workspace = fakeWorkspace([]);
+  const store = new JobStore({config, provider, log: line => lines.push(line), deps: {
+    prepareWorkspace: workspace.prepareWorkspace, compileWorkspace: workspace.compileWorkspace, readApiHeader: () => '// header\n',
+  }});
+  const first = store.create({demo: 1, prompt: 'Blink the LED please'});
+  await store.run(first.id);
+  const second = store.create({demo: 2, prompt: 'Explode'});
+  await store.run(second.id);
+  assert.match(lines[0], new RegExp(`^job ${first.id} demo 1 queued: "Blink the LED please"`));
+  assert.ok(lines.some(l => l.startsWith(`job ${first.id} demo 1 compiling`)), lines.join('\n'));
+  assert.ok(lines.some(l => l.startsWith(`job ${first.id} demo 1 ready`) && /\d+ bytes/.test(l)), lines.join('\n'));
+  assert.ok(lines.some(l => l.startsWith(`job ${second.id} demo 2 failed`) && l.includes('provider exploded')), lines.join('\n'));
+  assert.ok(!lines.some(l => l.includes('sk-ant-secret123456')), 'secret shapes must be redacted');
+  assert.ok(!lines.some(l => /logTail|Compiling user_app/.test(l)), 'log tail pushes are not lifecycle events');
+});
+
+test('the log hook defaults to silence so library users and tests stay quiet', async () => {
+  const {store} = makeStore({responses: [ok()]});
+  const job = store.create({demo: 1, prompt: 'Quiet'});
+  assert.equal((await store.run(job.id)).state, 'ready');
+});

@@ -38,3 +38,10 @@ test('runPio executes the real PlatformIO binary through the queue', async () =>
   assert.equal(result.code, 0);
   assert.match(result.log, /PlatformIO/);
 });
+
+// `echo` as the binary turns the argv into the log, so the test sees exactly what pio would receive.
+test('runPio passes -j to pio run only when jobs is set', async () => {
+  assert.equal((await runPio(['run', '-e', 'ai'], {pioBin: 'echo', jobs: 1})).log.trim(), 'run -e ai -j 1');
+  assert.equal((await runPio(['run', '-e', 'ai'], {pioBin: 'echo', jobs: null})).log.trim(), 'run -e ai');
+  assert.equal((await runPio(['system', 'info'], {pioBin: 'echo', jobs: 1})).log.trim(), 'system info');
+});

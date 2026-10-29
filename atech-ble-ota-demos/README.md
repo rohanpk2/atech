@@ -18,6 +18,8 @@ npm install
 npm start
 ```
 
+Server deployment with Docker: [deploy/README.md](deploy/README.md).
+
 Open **http://localhost:5173/demo1/** or **http://localhost:5173/demo2/** in desktop Chrome (stop any old `python3 -m http.server 5173` first; the backend now serves both dashboards). Connect the board, type for example "Make the onboard LED blink three times quickly, pause for two seconds, and repeat.", click **Build firmware**, read the generated `user_app.cpp`, then click **Deploy to device**. The dashboard verifies the device ID, the new build id, that the generated app loop is executing, and an echo before confirming the image; the board rolls back automatically if a generated app crashes before confirmation. Model access uses `ANTHROPIC_API_KEY` (or `ant auth login`) when present, otherwise the logged-in `claude` CLI.
 
 The builder also adds to every image: a unique device ID and pairing code (`ATECH-<MAC>`, last six hex digits in the BLE name and Wi-Fi SSID), an identity GATT service, a sandboxed app task that the stock blue/green blink now runs on, guarded GPIO, rollback confirmation and a crash-counting safe mode. A one-time USB installer with ESP Web Tools lives at `/demo1/install.html` and `/demo2/install.html` (Chrome/Edge desktop).
