@@ -1,0 +1,37 @@
+# Optional HTTPS front for the builder, needed once the dashboards run on Vercel
+# (../vercel-frontend/). Use it together with compose.yaml; the builder's own port mapping stays
+# on loopback and Caddy reaches it over the Compose network:
+#   sudo docker compose -f atech-ble-ota-demos/deploy/compose.yaml \
+#                       -f atech-ble-ota-demos/deploy/compose.tls.yaml up -d
+# Needs /etc/atech/caddy.env with ATECH_PUBLIC_HOST=<DNS name of this server> (template:
+# caddy.env.example), a DNS A record for that name pointing at the server, and ports 80 and 443
+# open in the firewall. ATECH_CADDY_ENV_FILE overrides the env file path for local tests.
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: atech-caddy
+    restart: unless-stopped
+    depends_on:
+      - builder
+    env_file:
+      - path: ${ATECH_CADDY_ENV_FILE:-/etc/atech/caddy.env}
+        required: true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data                                   # certificates and the ACME account
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+  caddy-config:

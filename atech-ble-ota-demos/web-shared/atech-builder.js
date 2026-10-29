@@ -19,6 +19,9 @@
 (function attachAtechBuilder(root) {
   const POLL_MS = 2000;
   const DEVICE_POLL_MS = 8000;
+  // Hosted: the backend counts a board as online only when it answered a probe in the last 20 s,
+  // so the timer must keep probing; 15 s keeps that state accurate with half the requests of 8 s.
+  const HOSTED_DEVICE_POLL_MS = 15000;
   const LOOP_WAIT_MS = 10000;
   const STAGE_PROGRESS = {queued: 5, generating: 25, repairing: 45, compiling: 65, validating: 85, ready: 100, failed: 100};
   const EXAMPLES = [
@@ -80,7 +83,19 @@
     const $ = id => doc.getElementById(id);
     const protocol = root.AtechIdentity;
     const win = doc.defaultView || root;
-    const key = adoptKey(win);
+    // Runtime configuration from /shared/atech-config.js (window.ATECH_CONFIG). The backend serves
+    // the local default; the Vercel build writes transport 'poll' and hosted true. apiBase is a
+    // same-origin path prefix, normally empty.
+    const cfg = root.ATECH_CONFIG || {};
+    const apiBase = String(cfg.apiBase || '').replace(/\/+$/, '');
+    const usePolling = cfg.transport === 'poll';
+    const hosted = Boolean(cfg.hosted);
+    const pollMs = Number(cfg.pollMs) || POLL_MS;
+    const devicePollMs = hosted ? HOSTED_DEVICE_POLL_MS : DEVICE_POLL_MS;
+    function apiUrl(path) { return apiBase + path; }
+    // Hosted: the proxy adds the backend key itself, so a key left in this browser by an old
+    // ?key= link is ignored and never sent.
+    const key = hosted ? null : adoptKey(win);
     const state = {
       job: null, source: null, pollTimer: null, busy: false, armedRollback: null, backendOk: false, keyRequired: false,
       devices: [], discovered: [], selectedDeviceId: null, devicePollTimer: null, deviceBusy: false,
@@ -95,14 +110,16 @@
     async function api(path, init = {}) {
       const headers = {...(init.headers || {})};
       if (key) headers['x-atech-key'] = key;
-      const response = await fetch(path, {cache: 'no-store', ...init, headers});
+      const response = await fetch(apiUrl(path), {cache: 'no-store', ...init, headers});
       if (response.status === 401) {
         let body = null;
         try { body = await response.clone().json(); } catch (_) { body = null; }
         if (body && body.keyRequired) {
           state.keyRequired = true;
           $('keyBanner').hidden = false;
-          $('keyBanner').textContent = 'This builder needs its dashboard key. Open the link the backend printed at start (it ends with ?key=...), then reload.';
+          $('keyBanner').textContent = hosted
+            ? 'The build service rejected this dashboard\'s key. The Vercel environment variable ATECH_BUILDER_KEY must match the backend\'s key.'
+            : 'This builder needs its dashboard key. Open the link the backend printed at start (it ends with ?key=...), then reload.';
         }
       }
       return response;
@@ -195,13 +212,16 @@
       state.devicePollTimer = setInterval(() => {
         if (state.deployment && !['verified', 'failed', 'aborted'].includes(state.deployment.state)) return;
         refreshDevices({probe: true}).catch(() => {});
-      }, DEVICE_POLL_MS);
+      }, devicePollMs);
     }
 
     function wifiAvailability() {
       const device = selectedDevice();
       if (!state.backendOk) return {ok: false, reason: 'Backend offline.'};
-      if (!device) return {ok: false, reason: state.devices.length ? 'Choose a device above.' : 'No board paired yet: click Find devices.'};
+      if (!device) {
+        if (hosted && !state.devices.length) return {ok: false, reason: 'Not available from the hosted dashboard yet: the build service runs in the cloud, not on your Wi-Fi.'};
+        return {ok: false, reason: state.devices.length ? 'Choose a device above.' : 'No board paired yet: click Find devices.'};
+      }
       if (!device.paired) return {ok: false, reason: `${device.id} is not paired; enter its OTA authorization code.`};
       if (!device.online || !device.identity) return {ok: false, reason: `${device.name || device.id} is not reachable on this network (${device.lastProbeError || 'no answer'}).`};
       if (device.identity.demo !== demo) return {ok: false, reason: `${device.id} runs Demo ${device.identity.demo}, this dashboard is Demo ${demo}.`};
@@ -253,18 +273,23 @@
         dot.className = 'dot unknown';
         $('devBadge').textContent = 'Bluetooth only';
         $('devBadge').className = 'badge working';
-        $('devStatus').textContent = 'Connected over Bluetooth. Pair it over Wi-Fi with Find devices for faster deployments.';
+        $('devStatus').textContent = hosted
+          ? 'Connected over Bluetooth. Deployments from this hosted dashboard go over Bluetooth.'
+          : 'Connected over Bluetooth. Pair it over Wi-Fi with Find devices for faster deployments.';
         $('devForget').hidden = true;
       } else {
         $('deviceName').textContent = 'No board yet';
         dot.className = 'dot';
         $('devBadge').textContent = 'Not found';
         $('devBadge').className = 'badge neutral';
-        $('devStatus').textContent = state.backendOk
-          ? 'Click Find devices to look for a board on your Wi-Fi, or connect over Bluetooth.'
-          : 'Start the builder backend to find boards.';
+        $('devStatus').textContent = hosted
+          ? 'Wi-Fi deployment from this hosted dashboard is not available yet. Connect over Bluetooth in Chrome or Edge, or download the firmware for the board\'s hotspot page.'
+          : state.backendOk
+            ? 'Click Find devices to look for a board on your Wi-Fi, or connect over Bluetooth.'
+            : 'Start the builder backend to find boards.';
         $('devForget').hidden = true;
       }
+      $('devFind').hidden = hosted;   // mDNS discovery would run on the cloud host, not on the user's Wi-Fi
       $('devFacts').hidden = !(device || bleIdentity || connectedBle);
       $('deviceId').textContent = identity ? identity.id : (device ? device.id : 'Unknown');
       $('pairingCode').textContent = identity ? identity.suffix : (device ? (device.suffix || 'Unknown') : 'Unknown');
@@ -341,7 +366,7 @@
     }
 
     async function findDevices() {
-      if (state.deviceBusy) return;
+      if (state.deviceBusy || hosted) return;
       state.deviceBusy = true;
       $('devFind').disabled = true;
       $('devProgress').hidden = false;
@@ -568,10 +593,10 @@
         };
         const poll = () => {
           stopDeployFollowing();
-          state.deployPollTimer = setInterval(() => pollOnce().catch(error => reject(error)), POLL_MS);
+          state.deployPollTimer = setInterval(() => pollOnce().catch(error => reject(error)), pollMs);
         };
-        if (typeof win.EventSource !== 'function') { poll(); return; }
-        const source = new win.EventSource(`/api/deployments/${id}/events`);
+        if (usePolling || typeof win.EventSource !== 'function') { poll(); return; }
+        const source = new win.EventSource(apiUrl(`/api/deployments/${id}/events`));
         state.deploySource = source;
         source.addEventListener('deployment', event => { const d = JSON.parse(event.data); renderDeployment(d); if (finished(d)) settle(d); });
         source.addEventListener('done', () => { pollOnce().catch(() => {}); });
@@ -777,9 +802,12 @@
         $('aiBackend').className = 'ai-backend ok';
       } catch (error) {
         state.backendOk = false;
-        $('aiBackend').textContent = state.keyRequired
-          ? 'Backend reachable but needs its dashboard key.'
-          : 'Backend offline. Start it with: cd builder && npm start, then reload this page.';
+        $('aiBackend').textContent = hosted
+          ? (state.keyRequired ? 'Build service refused the hosted dashboard key. Check ATECH_BUILDER_KEY on Vercel.'
+                               : 'Build service unreachable. The hosted dashboard could not reach the backend; try again in a minute.')
+          : state.keyRequired
+            ? 'Backend reachable but needs its dashboard key.'
+            : 'Backend offline. Start it with: cd builder && npm start, then reload this page.';
         $('aiBackend').className = 'ai-backend error';
       }
       refresh();
@@ -831,7 +859,7 @@
       renderDiagnostics(job);
       const download = $('aiDownload');
       if (job.state === 'ready') {
-        download.href = `/api/builds/${job.id}/firmware.bin${key ? `?key=${encodeURIComponent(key)}` : ''}`;
+        download.href = apiUrl(`/api/builds/${job.id}/firmware.bin${key ? `?key=${encodeURIComponent(key)}` : ''}`);
         download.hidden = false;
       } else {
         download.hidden = true;
@@ -855,13 +883,13 @@
 
     function poll(id) {
       stopFollowing();
-      state.pollTimer = setInterval(() => { pollOnce(id).catch(error => log(error.message, 'BUILDER', 'warn')); }, POLL_MS);
+      state.pollTimer = setInterval(() => { pollOnce(id).catch(error => log(error.message, 'BUILDER', 'warn')); }, pollMs);
     }
 
     function follow(id) {
       stopFollowing();
-      if (typeof win.EventSource !== 'function') { poll(id); return; }
-      const source = new win.EventSource(`/api/builds/${id}/events`);
+      if (usePolling || typeof win.EventSource !== 'function') { poll(id); return; }
+      const source = new win.EventSource(apiUrl(`/api/builds/${id}/events`));
       state.source = source;
       source.addEventListener('job', event => render(JSON.parse(event.data)));
       source.addEventListener('done', () => { stopFollowing(); pollOnce(id).catch(() => {}); });
@@ -994,7 +1022,9 @@
     $('aiPrompt').addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); build(); }
     });
-    $('aiBrowserNote').textContent = 'This browser has no Web Bluetooth, so the Bluetooth backup is unavailable here. Wi-Fi deployment works in Safari and Chrome once the board is on your Wi-Fi and paired. Otherwise download the firmware and use the hotspot steps, where pairing and upload are manual.';
+    $('aiBrowserNote').textContent = hosted
+      ? 'This browser has no Web Bluetooth, and Wi-Fi deployment from the hosted dashboard is not available yet. Generate and download the firmware here, then upload it on the board\'s hotspot page.'
+      : 'This browser has no Web Bluetooth, so the Bluetooth backup is unavailable here. Wi-Fi deployment works in Safari and Chrome once the board is on your Wi-Fi and paired. Otherwise download the firmware and use the hotspot steps, where pairing and upload are manual.';
     renderExamples();
     setStatus('', 'neutral', 'Idle');
     setProgress(0);

@@ -1,0 +1,15 @@
+# Caddy in front of the Atech builder container: HTTPS for the Vercel-hosted dashboards
+# (see ../vercel-frontend/README.md). Certificates come from Let's Encrypt automatically for
+# the name in ATECH_PUBLIC_HOST (/etc/atech/caddy.env). Only /api/* is forwarded; the
+# dashboards are served by Vercel, and the backend still requires its dashboard key on every
+# /api request, so a direct hit without the key answers 401.
+{$ATECH_PUBLIC_HOST} {
+	handle /api/* {
+		reverse_proxy builder:5173 {
+			flush_interval -1
+		}
+	}
+	handle {
+		respond "Atech build service. The dashboards are hosted separately." 404
+	}
+}

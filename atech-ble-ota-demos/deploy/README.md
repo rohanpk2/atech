@@ -16,6 +16,7 @@ Files:
 | `healthcheck.js` | Docker HEALTHCHECK against `/api/health` with the dashboard key |
 | `warm-cache.js` | compiles the stock app through the real workspace (cache warm-up and a hardware-free compile check) |
 | `builder.env.example` | template for `/etc/atech/builder.env` |
+| `compose.tls.yaml`, `Caddyfile`, `caddy.env.example` | optional HTTPS front (Caddy) for the Vercel-hosted dashboards, see below |
 | `../.dockerignore` | keeps `node_modules`, `.pio`, `.env*`, `.ai-builds` and docs out of the image |
 
 ## Prerequisites on the server
@@ -142,18 +143,52 @@ docker build -f atech-ble-ota-demos/deploy/Dockerfile --target test atech-ble-ot
 - Resetting the dashboard key: set `ATECH_BUILDER_KEY` in the env file, or delete
   `/data/builds/dashboard.key` inside the volume and restart.
 
-## Opening it to the internet later
+## HTTPS for the hosted dashboards
 
-Keep the port on loopback. Put a TLS reverse proxy (Caddy gives automatic certificates) in front of
-`127.0.0.1:5173`, set a fixed `ATECH_BUILDER_KEY`, and add proxy-level authentication for the static
-dashboard pages as well, since the key only guards `/api/*`. Web Bluetooth requires HTTPS on anything but
-`localhost`. The build API is never exposed directly.
+The dashboards can run on Vercel (`../vercel-frontend/README.md`) with this container as their
+backend. Vercel proxies `/api/*` to the server over the public internet, so the backend needs a
+public HTTPS name. It cannot reach a port bound to the server's loopback interface. The overlay
+`compose.tls.yaml` adds Caddy in front of the container with automatic Let's Encrypt
+certificates; the builder's own port mapping stays on `127.0.0.1`.
+
+Manual steps, done once (none of them is performed by the repository):
+
+1. DNS: create an A record, for example `atech-api.example.com`, pointing at the Droplet's IP.
+2. Firewall: allow inbound TCP 80 and 443 (DigitalOcean Cloud Firewall or `ufw`). Port 5173 stays
+   closed; only Caddy talks to it.
+3. `sudo install -m 644 /dev/null /etc/atech/caddy.env` and put `ATECH_PUBLIC_HOST=atech-api.example.com`
+   in it (template: `caddy.env.example`).
+4. Fix the dashboard key: set `ATECH_BUILDER_KEY` in `/etc/atech/builder.env` to a long random value
+   (`openssl rand -base64 24`) or read the generated one with
+   `sudo docker compose -f atech-ble-ota-demos/deploy/compose.yaml exec -T builder cat /data/builds/dashboard.key`.
+   The same value goes into the Vercel project as `ATECH_BUILDER_KEY`.
+5. Start both:
+
+```sh
+cd /home/atech/atech
+sudo docker compose -f atech-ble-ota-demos/deploy/compose.yaml -f atech-ble-ota-demos/deploy/compose.tls.yaml up -d
+sudo docker compose -f atech-ble-ota-demos/deploy/compose.yaml -f atech-ble-ota-demos/deploy/compose.tls.yaml logs -f caddy
+```
+
+Caddy prints the certificate issuance in its log within a minute. Verify from any machine:
+
+```sh
+curl -si https://atech-api.example.com/api/health            # 401: the key is required (expected)
+curl -si -H "x-atech-key: $KEY" https://atech-api.example.com/api/health   # 200 {"ok":true,...}
+curl -si https://atech-api.example.com/demo1/                # 404: dashboards are not served here
+```
+
+Caddy forwards only `/api/*`. Everything else answers 404 so the dashboards exist in one place, on
+Vercel, behind the sign-in configured there. Keep the key private: it is the only thing standing
+between the internet and a firmware build on this server. Rotate it by changing
+`ATECH_BUILDER_KEY` in the env file, restarting the container, and updating the Vercel variable.
 
 ## Limitations of a cloud deployment
 
 - Wi-Fi LAN deployment and mDNS discovery need the backend on the same network as the board; a cloud
-  host cannot reach a board on a home LAN, so Wi-Fi deploy reports the board unreachable. Bluetooth
-  deployment from the browser and the firmware download for the hotspot portal work unchanged.
+  host cannot reach a board on a home LAN, so Wi-Fi deploy reports the board unreachable. The hosted
+  dashboard says so and hides Find devices. Bluetooth deployment from the browser and the firmware
+  download for the hotspot portal work unchanged.
 - The USB installer (`/demo1/install.html`) needs the base image; build it once with
   `$C run --rm builder node deploy/warm-cache.js --install-only --base` or the page's own button.
 - This packaging was built and exercised on a laptop (Docker Desktop, arm64) and in the compose

@@ -7,3 +7,8 @@
 
 # per-device OTA authorization codes stored by the builder backend; never commit
 atech-ble-ota-demos/.ai-builds/devices.json
+
+# dependency and deployment artefacts
+node_modules/
+.vercel/
+atech-ble-ota-demos/vercel-frontend/dist/

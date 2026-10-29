@@ -48,4 +48,13 @@ assert.doesNotMatch(source + css, /—/, 'copy must not contain em dashes');
 assert.match(source, /\/api\/builds\/\$\{[^}]+\}\/firmware\.bin/, 'download link must point at the backend');
 assert.match(css, /prefers-reduced-motion/);
 
+// Runtime configuration (web-shared/atech-config.js): same-origin API base, poll-only transport for the
+// hosted dashboard, honest copy about cloud Wi-Fi deployment.
+assert.match(source, /root\.ATECH_CONFIG/, 'module must read window.ATECH_CONFIG');
+assert.match(source, /function apiUrl\(/, 'every backend URL must go through apiUrl');
+assert.match(source, /transport === 'poll'/, 'a poll-only transport must be supported');
+assert.match(source, /usePolling \|\| typeof win\.EventSource !== 'function'/, 'poll mode must never open an EventSource');
+assert.match(source, /hosted dashboard yet/, 'hosted copy must say cloud Wi-Fi deployment is not available yet');
+assert.doesNotMatch(source, /fetch\((?!apiUrl)/, 'fetch must only be called through apiUrl');
+
 console.log('Atech builder UI structure tests passed');

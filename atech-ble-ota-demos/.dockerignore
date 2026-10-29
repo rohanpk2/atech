@@ -14,3 +14,6 @@ docs
 *.md
 !builder/prompts/system.md
 benchmark-results.csv
+
+# The Vercel frontend is deployed from its own directory, never from this image.
+vercel-frontend

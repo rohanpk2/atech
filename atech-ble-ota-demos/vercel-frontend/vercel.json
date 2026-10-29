@@ -1,0 +1,32 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "redirects": [
+    {"source": "/", "destination": "/demo1/", "permanent": false},
+    {"source": "/demo1", "destination": "/demo1/", "permanent": true},
+    {"source": "/demo2", "destination": "/demo2/", "permanent": true}
+  ],
+  "routes": [
+    {
+      "src": "^/api/(.*)$",
+      "dest": "${ATECH_BACKEND_URL}/api/$1",
+      "env": ["ATECH_BACKEND_URL"],
+      "transforms": [
+        {
+          "type": "request.headers",
+          "op": "set",
+          "target": {"key": "x-atech-key"},
+          "args": "$ATECH_BUILDER_KEY",
+          "env": ["ATECH_BUILDER_KEY"]
+        },
+        {
+          "type": "request.headers",
+          "op": "delete",
+          "target": {"key": "authorization"}
+        }
+      ]
+    }
+  ]
+}
