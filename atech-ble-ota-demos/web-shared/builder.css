@@ -114,6 +114,13 @@
 .ai-progress { margin-top: 14px; }
 
 /* ---- Step 3: deployment ---- */
+/* ---- Wi-Fi setup over Bluetooth (step 1) ---- */
+.prov { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.prov h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.prov .state { margin-top: 0; }
+.prov-form { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto auto; gap: 8px; margin-top: 12px; }
+.prov-form input { min-width: 0; }
+.prov-actions { margin-top: 10px; }
 .methods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .method {
   display: grid;
@@ -153,6 +160,7 @@
 }
 
 @media (max-width: 600px) {
+  .prov-form { grid-template-columns: minmax(0, 1fr); }
   .step { grid-template-columns: 26px minmax(0, 1fr); gap: 12px; }
   .step::before { left: 12.5px; top: 44px; }
   .step-marker { width: 26px; height: 26px; margin-top: 14px; font-size: 12px; }

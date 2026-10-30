@@ -5,6 +5,7 @@
 // through the protected Atech core (shared/AtechCore). The gb88 protocol is
 // untouched; the core only pauses the app while a transfer owns flash.
 #include <Arduino.h>
+#include <AtechBleProv.h>
 #include <AtechCloudOta.h>
 #include <AtechCore.h>
 #include <AtechWifiLan.h>
@@ -59,6 +60,7 @@ BLEServer *server = nullptr;
 AtechWifiOtaPortal wifiOta;
 AtechWifiLan wifiLan;
 AtechCloudOta cloudOta;
+AtechBleProv bleProv;
 volatile bool connected = false;
 volatile bool abortRequested = false;
 bool wasConnected = false;
@@ -89,6 +91,8 @@ String lanAuthToken() {
 }
 
 bool cloudHoldsConfirm() { return cloudOta.holdsConfirm(); }
+// A short BOOT press lets an owned board accept new Wi-Fi or server settings over Bluetooth.
+void handleShortPress() { bleProv.noteButtonPress(); }
 String cloudIdentity() { return cloudOta.statusJson(); }
 bool homeWifiConnected() { return wifiLan.isConnected(); }
 
@@ -175,6 +179,18 @@ void setup() {
   BLEOTA.init();
   // Identity, control and event characteristics shared with Demo 1.
   atech::coreAttachBle(server);
+  // Bluetooth Wi-Fi setup (shared with Demo 1): see AtechBleProv.h.
+  AtechBleProvConfig provConfig = {};
+  provConfig.server = server;
+  provConfig.lan = &wifiLan;
+  provConfig.cloud = &cloudOta;
+  provConfig.authToken = lanAuthToken;
+  provConfig.busy = anyOtaBusy;
+  provConfig.unlockWindowMs = 120000;
+  provConfig.preferencesNamespace = "atech_prov";
+  if (!bleProv.begin(provConfig)) {
+    Serial.printf("Bluetooth provisioning initialization failed: %s\n", bleProv.lastError().c_str());
+  }
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(BLEOTA.getBLEOTAuuid());
   adv->setScanResponse(true);
@@ -233,6 +249,7 @@ void setup() {
   wifiOtaConfig.rebootDelayMs = 2200;
   wifiOtaConfig.otherOtaBusy = otherOtaBusy;
   wifiOtaConfig.modeChanged = wifiOtaModeChanged;
+  wifiOtaConfig.shortPress = handleShortPress;
   if (!wifiOta.begin(wifiOtaConfig)) {
     Serial.printf("Wi-Fi OTA initialization failed: %s\n",
                   wifiOta.lastError().c_str());
@@ -246,6 +263,7 @@ void loop() {
   wifiLan.loop();
   wifiOta.loop();
   cloudOta.loop();
+  bleProv.loop();
   // A LAN or cloud transfer pauses advertising (not a connected client) so the
   // radio favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
   const bool lanTransfer = wifiLan.isTransferring() || cloudOta.isTransferring();

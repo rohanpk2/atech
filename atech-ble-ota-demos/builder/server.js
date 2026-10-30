@@ -16,6 +16,7 @@ const {DeploymentStore} = require('./lib/lan-ota');
 const {CloudDeviceService} = require('./lib/cloud-devices');
 const {CloudDeploymentStore} = require('./lib/cloud-ota');
 const {createDeviceHandler} = require('./lib/cloud-routes');
+const {provisionGrantHex, CloudError} = require('./lib/cloud-auth');
 const {createFakeDevice} = require('./lib/fake-device');
 const {createFakeCloudDevice} = require('./lib/fake-cloud-device');
 const installerModule = require('./lib/installer');
@@ -129,6 +130,7 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
   let lastRefreshAt = 0;
   let refreshPromise = null;
   const forbidden = res => sendJson(res, 403, {error: 'This board belongs to another dashboard user'});
+  const forbiddenBuild = res => sendJson(res, 403, {error: 'This build belongs to another dashboard user'});
   const sendCloudError = (res, error) => sendJson(res, Number(error.status) || 500, {error: redactSecrets(error.message), code: error.code || 'error'});
   // A deployment from either store, checked against the caller's principal for cloud jobs.
   const findDeployment = (id, principal) => {
@@ -181,6 +183,24 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
     } catch (error) { sendCloudError(res, error); }
   });
 
+  // Owner grant for Bluetooth provisioning: a claimed board accepts new Wi-Fi credentials or a new
+  // server URL only from its owner (this HMAC with the stored pairing token, bound to the board's
+  // session nonce and both ECDH public keys) or after a BOOT press. The token never leaves the backend.
+  route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/provision-grant$/, async (req, res, [id]) => {
+    const body = await readJson(req);
+    const principal = principalOf(req, config);
+    const record = devices.get(id);
+    try {
+      if (record && !devices.canAccess(id, principal)) throw new CloudError(403, 'owned', 'This board belongs to another dashboard user');
+      if (!record || !record.secret) throw new CloudError(404, 'unclaimed', `${id} is not claimed in this dashboard; set up Wi-Fi first and it will be claimed automatically`);
+      const nonce = String(body.nonce || '').toLowerCase();
+      const transcript = String(body.transcript || '').toLowerCase();
+      if (!/^[0-9a-f]{32}$/.test(nonce)) throw new CloudError(400, 'bad_request', 'nonce must be 32 hex characters');
+      if (!/^[0-9a-f]{64}$/.test(transcript)) throw new CloudError(400, 'bad_request', 'transcript must be 64 hex characters');
+      sendJson(res, 200, {grant: provisionGrantHex(record.secret, {deviceId: id, nonce, transcript})});
+    } catch (error) { sendCloudError(res, error); }
+  });
+
   route('POST', /^\/api\/devices\/discover$/, async (req, res) => {
     try { sendJson(res, 200, {found: await devices.discover({timeoutMs: 1800})}); }
     catch (error) { sendJson(res, 500, {error: redactSecrets(error.message)}); }
@@ -229,6 +249,7 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
     const body = await readJson(req);
     const deviceId = String(body.deviceId || '').trim();
     const principal = principalOf(req, config);
+    if (!jobs.canAccess(id, principal)) { forbiddenBuild(res); return; }
     const record = devices.get(deviceId);
     if (record && !devices.canAccess(deviceId, principal)) { forbidden(res); return; }
     const via = String(body.via || '').toLowerCase();
@@ -307,13 +328,23 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
   });
 
   route('GET', /^\/api\/builds$/, async (req, res, [], url) => {
-    sendJson(res, 200, jobs.list(url.searchParams.get('demo')));
+    sendJson(res, 200, jobs.list(url.searchParams.get('demo'), principalOf(req, config)));
   });
 
   route('POST', /^\/api\/builds$/, async (req, res) => {
     const body = await readJson(req);
     let job;
-    try { job = jobs.create({demo: body.demo, prompt: body.prompt, deviceId: body.deviceId}); }
+    try { job = jobs.create({demo: body.demo, prompt: body.prompt, deviceId: body.deviceId, ownerId: principalOf(req, config)}); }
+    catch (error) { sendJson(res, 400, {error: error.message}); return; }
+    jobs.run(job.id).catch(() => {});
+    sendJson(res, 202, {id: job.id, buildId: job.buildId, appVersion: job.appVersion});
+  });
+
+  // The checked-in stock app as a deployable job (static blink v2), no model involved.
+  route('POST', /^\/api\/builds\/stock$/, async (req, res) => {
+    const body = await readJson(req);
+    let job;
+    try { job = jobs.createStock({demo: body.demo, ownerId: principalOf(req, config)}); }
     catch (error) { sendJson(res, 400, {error: error.message}); return; }
     jobs.run(job.id).catch(() => {});
     sendJson(res, 202, {id: job.id, buildId: job.buildId, appVersion: job.appVersion});
@@ -322,12 +353,14 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
   route('GET', /^\/api\/builds\/([0-9a-f]+)$/, async (req, res, [id]) => {
     const job = jobs.get(id);
     if (!job) { sendJson(res, 404, {error: 'Unknown job'}); return; }
+    if (!jobs.canAccess(id, principalOf(req, config))) { forbiddenBuild(res); return; }
     sendJson(res, 200, job);
   });
 
   route('GET', /^\/api\/builds\/([0-9a-f]+)\/events$/, async (req, res, [id]) => {
     const job = jobs.get(id);
     if (!job) { sendJson(res, 404, {error: 'Unknown job'}); return; }
+    if (!jobs.canAccess(id, principalOf(req, config))) { forbiddenBuild(res); return; }
     res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive'});
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     const finish = snapshot => { send('done', {state: snapshot.state}); res.end(); };
@@ -344,6 +377,7 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
   route('GET', /^\/api\/builds\/([0-9a-f]+)\/firmware\.bin$/, async (req, res, [id]) => {
     const job = jobs.get(id);
     if (!job) { sendJson(res, 404, {error: 'Unknown job'}); return; }
+    if (!jobs.canAccess(id, principalOf(req, config))) { forbiddenBuild(res); return; }
     const file = jobs.firmwarePath(id);
     if (!file || !fs.existsSync(file)) { sendJson(res, 409, {error: `Job is ${job.state}, firmware is not available`}); return; }
     const stat = fs.statSync(file);
@@ -357,6 +391,7 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
 
   route('POST', /^\/api\/builds\/([0-9a-f]+)\/deployed$/, async (req, res, [id]) => {
     const body = await readJson(req);
+    if (jobs.get(id) && !jobs.canAccess(id, principalOf(req, config))) { forbiddenBuild(res); return; }
     const job = jobs.recordDeployment(id, {deviceId: body.deviceId || '', result: body.result || 'unknown',
                                            detail: body.detail || '', transport: body.transport || ''});
     if (!job) { sendJson(res, 404, {error: 'Unknown job'}); return; }

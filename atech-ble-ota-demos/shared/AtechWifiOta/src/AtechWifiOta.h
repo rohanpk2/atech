@@ -22,6 +22,9 @@ struct AtechWifiOtaConfig {
   uint32_t rebootDelayMs;
   bool (*otherOtaBusy)();
   void (*modeChanged)(bool active);
+  // Optional: called once when BOOT is released before buttonHoldMs (a short press). The
+  // Bluetooth provisioning service uses it as the physical-presence unlock of an owned board.
+  void (*shortPress)();
   // Optional station-mode manager. When set, the portal gains the home Wi-Fi
   // provisioning card and runs the hotspot in AP+STA mode so the user can
   // watch the join succeed from the same page.

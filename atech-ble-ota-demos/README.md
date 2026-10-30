@@ -8,7 +8,7 @@ Describe what an ESP32-S3 board should do in plain English. Atech writes the fir
 2. **Generate.** The backend asks Claude for the code, compiles it with PlatformIO, and validates the image.
 3. **Deploy.** On your own network the backend streams the image to the board over Wi-Fi. From the hosted dashboard the board pulls it: it polls the backend over HTTPS, downloads the image, flashes it, reboots, and confirms it is running once the backend has seen the new build. If the new code crashes, the board rolls back on its own.
 
-Bluetooth (desktop Chrome) and the board's own hotspot are backups when Wi-Fi is not available.
+Bluetooth (desktop Chrome) is also how a new board is put on Wi-Fi in the first place: an encrypted setup over the same connection, no hotspot and no serial console. The board's own hotspot page stays as a backup.
 
 ## Parts
 
@@ -16,7 +16,7 @@ Bluetooth (desktop Chrome) and the board's own hotspot are backups when Wi-Fi is
 | --- | --- |
 | `builder/` | Node backend. Talks to the model, compiles, validates, deploys, and serves the dashboards. |
 | `web-shared/` | The dashboard card shared by both demos. |
-| `shared/` | Protected firmware core: device identity, sandboxed app task, Wi-Fi (LAN and cloud) and Bluetooth OTA, rollback, safe mode. Generated code never touches it. |
+| `shared/` | Protected firmware core: device identity, sandboxed app task, Wi-Fi setup over Bluetooth, Wi-Fi (LAN and cloud) and Bluetooth OTA, rollback, safe mode. Generated code never touches it. |
 | `demo1-custom-gatt/` | Demo 1: Atech's own Bluetooth protocol. |
 | `demo2-bleota-library/` | Demo 2: the same system on the open-source `gb88/BLEOTA` library (AGPL-3.0). |
 | `deploy/` | Docker packaging for running the backend on a server. |
@@ -38,17 +38,17 @@ No laptop? The dashboards can run on Vercel with the backend on a server: see [v
 ## First-time board setup
 
 1. Flash the base firmware once over USB: `pio run -e base -t upload` inside a demo folder, or use the browser installer at `/demo1/install.html`.
-2. Hold **BOOT** for three seconds, join the board's `Atech-OTA-…` hotspot, open http://192.168.4.1, enter the authorization code, and join your 2.4 GHz Wi-Fi. The hotspot password and code are printed on the serial console at boot.
-3. In the dashboard, click **Find devices**, then **Pair** with the same code. On the hosted dashboard click **Claim a board** instead and enter the board ID and the same code.
+2. In desktop Chrome, click **Connect Bluetooth**, then in **Wi-Fi setup** pick your 2.4 GHz network, type its password and click **Join Wi-Fi**. The password goes to the board over an encrypted Bluetooth session and nowhere else; the board joins, reports to the build service and is claimed for you automatically.
 
-After that, every update is wireless.
+After that, every update is wireless, from any browser. Builds generated before 2026-10-29 must be generated again before a cloud deployment: their images predate the Bluetooth setup service. No Bluetooth on this computer? The board's hotspot page still works: hold **BOOT** for three seconds, join `Atech-OTA-…`, open http://192.168.4.1, enter the authorization code printed on the serial console, join your Wi-Fi, then **Claim a board** with the same code. See [WIFI_BLE_ONBOARDING.md](WIFI_BLE_ONBOARDING.md).
 
 ## Status
 
-Compiles, passes the automated tests, and works end to end against a simulated board, including the cloud path. **Nothing has been verified on a physical ESP32-S3 yet.** These are prototypes: updates are authenticated with a per-device key and integrity-checked, but firmware is not cryptographically signed.
+Compiles, passes the automated tests, and works end to end against a simulated board, including the cloud path and the Bluetooth Wi-Fi setup. **Nothing has been verified on a physical ESP32-S3 yet** beyond reading the boot log of the attached board (WIFI_BLE_ONBOARDING.md section 9). These are prototypes: updates are authenticated with a per-device key and integrity-checked, but firmware is not cryptographically signed.
 
 ## More
 
+- [WIFI_BLE_ONBOARDING.md](WIFI_BLE_ONBOARDING.md): one-time Wi-Fi setup over Bluetooth, the end-to-end cloud OTA flow, exact flash, redeploy and validation commands.
 - [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md): what generated code may do, validation, identity and recovery.
 - [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md): Wi-Fi provisioning, deployment protocol, security review, browser support.
 - [CLOUD_WIFI_OTA.md](CLOUD_WIFI_OTA.md): cloud deployments from the hosted dashboard, device API, claiming, rollback, the physical checklist.

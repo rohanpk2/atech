@@ -185,6 +185,8 @@ Vercel, behind the sign-in configured there. Keep the key private: it is the onl
 between the internet and a firmware build on this server. Rotate it by changing
 `ATECH_BUILDER_KEY` in the env file, restarting the container, and updating the Vercel variable.
 
+Boards learn this name over Bluetooth during their one-time Wi-Fi setup (the dashboard reads `ATECH_PUBLIC_URL` from `/api/health` and provisions it), so set it before customers set up boards; see `../WIFI_BLE_ONBOARDING.md`.
+
 The same name is what the boards talk to. `/api/device/*` is the device API: it does not take the
 dashboard key (boards authenticate with their own pairing token and a bearer session, see
 [../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md)), it is rate limited per address and per board id, and

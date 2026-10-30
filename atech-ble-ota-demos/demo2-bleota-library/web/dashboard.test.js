@@ -41,7 +41,9 @@ assert.match(html, /href="install\.html"/);
 assert.match(html, /gb88/, 'the dashboard must credit the gb88 protocol it speaks');
 
 assert.match(app, /namePrefix: 'Atech-Library-OTA'/);
-assert.match(app, /optionalServices: \[BLEOTA\.BLEOTA_SERVICE, AtechIdentity\.IDENTITY_SERVICE\]/);
+assert.match(app, /optionalServices: \[BLEOTA\.BLEOTA_SERVICE, AtechIdentity\.IDENTITY_SERVICE, AtechProvision\.SERVICE\]/);
+assert.match(app, /AtechProvision\.createSession\(/, 'app.js must build the Wi-Fi setup session from the provisioning characteristics');
+assert.ok(html.indexOf('/shared/atech-provision.js') < html.indexOf('/shared/atech-builder.js'), 'the provisioning module must load before the builder');
 assert.match(app, /writeValueWithResponse/, 'sector writes must use with-response writes so long writes work at any MTU');
 assert.match(app, /BLEOTA\.buildSectorPackets\(/);
 assert.match(app, /BLEOTA\.parseSectorAck\(/);

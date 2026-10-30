@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {loadConfig} = require('./config');
 const {validateImage} = require('./image');
-const {AGENT_MARKER} = require('./jobs');
+const {AGENT_MARKER, PROV_MARKER} = require('./jobs');
 const {canAccess} = require('./devices');
 const {normalizeReport} = require('./cloud-devices');
 const {newJobId, CloudError} = require('./cloud-auth');
@@ -130,8 +130,15 @@ class CloudDeploymentStore {
     const image = fs.readFileSync(file);
     const entry = this.config.demos[job.demo];
     const validation = validateImage(image, {slotSize: this.config.slotSize, sizeMargin: this.config.sizeMargin,
-                                             markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER]});
-    if (!validation.ok) throw new CloudError(400, 'bad_request', `Image validation failed: ${validation.errors.join('; ')}`);
+                                             markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER]});
+    if (!validation.ok) {
+      const missingCore = validation.errors.some(e => e.includes(PROV_MARKER) || e.includes(AGENT_MARKER));
+      if (missingCore) {
+        throw new CloudError(400, 'rebuild', `Build ${job.buildId} was made before 2026-10-29 and lacks the Bluetooth setup or cloud agent service; ` +
+                                             'generate it again (or rebuild the stock app) before deploying through the cloud');
+      }
+      throw new CloudError(400, 'bad_request', `Image validation failed: ${validation.errors.join('; ')}`);
+    }
     const sha256 = sha256Hex(image);
     if (job.firmware.sha256 && job.firmware.sha256 !== sha256) throw new CloudError(400, 'bad_request', 'Firmware digest on disk does not match the build record');
     const active = this.activeFor(deviceId);

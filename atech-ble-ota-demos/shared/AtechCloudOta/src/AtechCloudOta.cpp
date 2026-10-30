@@ -682,6 +682,13 @@ void AtechCloudOta::loop() {}
 bool AtechCloudOta::isEnabled() const { return _impl && _impl->initialized && _impl->enabled(); }
 bool AtechCloudOta::isTransferring() const { return _impl && _impl->transferring; }
 bool AtechCloudOta::holdsConfirm() const { return _impl && _impl->holdConfirm; }
+bool AtechCloudOta::hasSession() const {
+  if (!_impl) return false;
+  const bool locked = _impl->take();
+  const bool has = !_impl->session.isEmpty();
+  if (locked) _impl->give();
+  return has;
+}
 String AtechCloudOta::serverUrl() const {
   if (!_impl) return String();
   const bool locked = _impl->take();

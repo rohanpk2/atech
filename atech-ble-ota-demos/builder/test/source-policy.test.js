@@ -86,3 +86,14 @@ test('oversized sources are rejected', () => {
   const result = checkSource(GOOD + '\n' + '// x\n'.repeat(20000));
   assert.ok(rules(result).includes('size'));
 });
+
+test('a reference to a protected core library by name is a policy violation', () => {
+  for (const name of ['AtechBleProv', 'AtechCloudOta', 'AtechWifiLan', 'AtechWifiOtaPortal']) {
+    const result = checkSource(GOOD.replace('atech::log("ready");', `${name} thing; atech::log("ready");`));
+    assert.equal(result.ok, false, `${name} must be refused`);
+    assert.ok(rules(result).includes('forbidden-api'), `${name} must be reported as a forbidden API`);
+    assert.match(result.violations.find(v => v.rule === 'forbidden-api').message, /protected core/);
+  }
+  assert.equal(checkSource(GOOD.replace('atech::log("ready");', '// AtechBleProv is mentioned in a comment only\n  atech::log("ready");')).ok, true,
+               'comments never trigger the rule');
+});

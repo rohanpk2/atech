@@ -950,6 +950,7 @@ struct AtechWifiOtaPortal::Impl {
       buttonHandled = false;
       buttonPressedMs = millis();
     } else if (!pressed) {
+      if (buttonWasPressed && !buttonHandled && config.shortPress) config.shortPress();
       buttonWasPressed = false;
       buttonHandled = false;
     } else if (!buttonHandled && millis() - buttonPressedMs >= config.buttonHoldMs) {

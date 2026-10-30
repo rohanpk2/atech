@@ -123,7 +123,57 @@ function updateLastSeen() {
 
 function clearGattHandles() {
   fwChar = cmdChar = identityChar = identityControlChar = identityEventChar = null;
+  provStatusChar = provRequestChar = provReplyChar = null;
+  if (window.AtechDemo2Transport) window.AtechDemo2Transport.provisioning = null;
 }
+// Wi-Fi setup over Bluetooth (shared/AtechBleProv on the board, web-shared/atech-provision.js
+// here): the shared builder card drives it through transport.provisioning. The characteristics
+// are discovered on connect; nothing here ever logs or stores what travels inside the session.
+let provStatusChar = null;
+let provRequestChar = null;
+let provReplyChar = null;
+
+function makeProvisioning() {
+  return {
+    available: () => Boolean(provRequestChar && provReplyChar && provStatusChar && isConnected()),
+    session: () => AtechProvision.createSession({
+      write: frame => provRequestChar.writeValueWithResponse(frame),
+      subscribe: handler => {
+        const characteristic = provReplyChar;
+        const listener = event => {
+          const value = event.target.value;
+          handler(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+        };
+        characteristic.addEventListener('characteristicvaluechanged', listener);
+        return () => characteristic.removeEventListener('characteristicvaluechanged', listener);
+      },
+    }),
+    readStatus: async () => {
+      const raw = await provStatusChar.readValue();
+      return AtechProvision.parseStatus(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+    },
+  };
+}
+
+async function discoverProvisioning(server, transport) {
+  provStatusChar = provRequestChar = provReplyChar = null;
+  if (transport) transport.provisioning = null;
+  try {
+    const service = await server.getPrimaryService(AtechProvision.SERVICE);
+    [provStatusChar, provRequestChar, provReplyChar] = await Promise.all([
+      service.getCharacteristic(AtechProvision.STATUS_CHAR),
+      service.getCharacteristic(AtechProvision.REQUEST_CHAR),
+      service.getCharacteristic(AtechProvision.REPLY_CHAR),
+    ]);
+    await provReplyChar.startNotifications();
+    if (transport) transport.provisioning = makeProvisioning();
+  } catch (error) {
+    provStatusChar = provRequestChar = provReplyChar = null;
+    log(`No Wi-Fi setup service on this firmware (${error.message}). Flash the current base image to set up Wi-Fi over Bluetooth.`,
+        'BROWSER', 'warn');
+  }
+}
+
 
 function renderIdentity() {
   // The shared builder module renders the device panel from the LAN registry
@@ -326,6 +376,8 @@ async function connectGatt() {
         'BROWSER', 'warn');
   }
 
+  await discoverProvisioning(server, window.AtechDemo2Transport);
+
   if (!currentIdentity) $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
   setConnectionState('online', 'Connected');
   setSignalState('waiting', 'Waiting');
@@ -343,7 +395,7 @@ async function selectAndConnect() {
   } else {
     device = await navigator.bluetooth.requestDevice({
       filters: [{namePrefix: 'Atech-Library-OTA'}],
-      optionalServices: [BLEOTA.BLEOTA_SERVICE, AtechIdentity.IDENTITY_SERVICE],
+      optionalServices: [BLEOTA.BLEOTA_SERVICE, AtechIdentity.IDENTITY_SERVICE, AtechProvision.SERVICE],
     });
     observeDevice(device);
   }
@@ -659,6 +711,8 @@ window.AtechDemo2Transport = {
   readIdentity,
   deploy: deployBytes,
   control: opcode => sendControl(opcode),
+  provisioning: null,   // set on connect when the board has the Wi-Fi setup service
+  transferring: () => transferring,
 };
 
 setConnectionState('offline', 'Bluetooth off');

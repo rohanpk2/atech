@@ -131,7 +131,7 @@ under the status, and Download firmware fetches the validated image through the 
 
 ## What works where
 
-| Browser | Generate, status, download | Cloud Wi-Fi deploy (board on its own Wi-Fi) | Bluetooth deployment |
+| Browser | Generate, status, download | Cloud Wi-Fi deploy (board on its own Wi-Fi) | Bluetooth: one-time Wi-Fi setup and deployment backup |
 | --- | --- | --- | --- |
 | Chrome, Edge (desktop, Android) | yes | yes | yes (HTTPS origin) |
 | Safari (macOS, iPhone, iPad) | yes | yes | no Web Bluetooth |

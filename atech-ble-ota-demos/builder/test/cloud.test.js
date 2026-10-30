@@ -403,6 +403,8 @@ test('a lost success report is repeated on the next poll instead of failing the 
     assert.equal(ctx.store.get(created.id).state, 'succeeded', ctx.store.get(created.id).error);
     assert.equal(ctx.device.stats.droppedReports, 1);
     assert.equal(ctx.device.state.confirmCount, 1, 'confirmed once');
+    // The repeated report is answered on the poll after the one that marked the job succeeded.
+    await ctx.device.waitFor(() => ctx.device.state.bootMarker === null, 2000);
     assert.equal(ctx.device.state.bootMarker, null, 'the marker is cleared after the repeated report');
   } finally { await ctx.stop(); }
 });
@@ -476,5 +478,20 @@ test('an aborted firmware download closes the file stream', async () => {
     await wait(200);
     assert.equal(streams.length, 1);
     assert.equal(streams[0].destroyed, true, 'the read stream is closed when the board goes away');
+  } finally { await ctx.stop(); }
+});
+
+test('an image from before the provisioning service is refused with a rebuild hint', async () => {
+  const ctx = await boot({startDevice: false});
+  try {
+    await ctx.claim();
+    const file = path.join(ctx.jobs.jobsDir, ctx.job.id, 'firmware.bin');
+    const image = Buffer.from(fs.readFileSync(file));
+    const at = image.indexOf('ATECH-PROV:1', 0, 'latin1');
+    assert.ok(at > 0);
+    image.fill(0, at, at + 'ATECH-PROV:1'.length);
+    fs.writeFileSync(file, image);
+    ctx.jobs.update(ctx.jobs.jobs.get(ctx.job.id), {firmware: {size: image.length, crc32: '0', sha256: sha256Hex(image), path: 'x'}});
+    assert.throws(() => ctx.create(), error => error.code === 'rebuild' && /before 2026-10-29|rebuild/i.test(error.message));
   } finally { await ctx.stop(); }
 });

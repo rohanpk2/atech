@@ -40,6 +40,8 @@ Every dashboard route that touches a board or a deployment is filtered or refuse
 
 ## 3. First-time bootstrap
 
+**Since 2026-10-29 the normal path is Bluetooth:** flash the base image over USB, **Connect Bluetooth** in desktop Chrome, and use the **Wi-Fi setup** block in step 1 (network, password, **Join Wi-Fi**). The dashboard provisions the server URL from `ATECH_PUBLIC_URL` and claims the board automatically with the token it reads inside the encrypted session; nothing is typed from the serial console. See [WIFI_BLE_ONBOARDING.md](WIFI_BLE_ONBOARDING.md). The hotspot route below remains the backup.
+
 A board needs an image that contains the cloud agent (any build from this commit on) and a Wi-Fi network. Two routes:
 
 **USB (new board, or a board whose NVS should be erased):** open `/demo1/install.html` or `/demo2/install.html` in desktop Chrome or Edge (or run `pio run -e base -t upload` in the demo folder) and install the baseline. Open the serial console (115200 baud) and press RST: the boot log prints the device id, the hotspot name and password, and the OTA authorization code. Record them. When the backend was started with `ATECH_PUBLIC_URL`, the baseline already carries the server URL (`[cloud] agent ATECH-CLOUD-AGENT:1 reporting to https://...`); otherwise set it on the hotspot portal below.

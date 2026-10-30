@@ -66,6 +66,23 @@
           <p id="devHint" class="hint"></p>
           <p id="aiBrowserNote" class="hint" hidden></p>
 
+          <div id="provPanel" class="prov" hidden>
+            <h3>Wi-Fi setup</h3>
+            <p id="provState" class="state neutral" aria-live="polite"></p>
+            <div id="provProgress" class="progress working indeterminate" aria-hidden="true" hidden><div></div></div>
+            <div class="prov-form">
+              <input id="provSsid" type="text" list="provNetworks" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Wi-Fi network (2.4 GHz)">
+              <datalist id="provNetworks"></datalist>
+              <input id="provPassword" type="password" autocomplete="new-password" placeholder="Wi-Fi password">
+              <button id="provScan" class="btn secondary" type="button">Scan</button>
+              <button id="provJoin" class="btn primary" type="button">Join Wi-Fi</button>
+            </div>
+            <div class="actions prov-actions">
+              <button id="provForget" class="btn text" type="button" hidden>Forget Wi-Fi</button>
+            </div>
+            <p id="provHint" class="hint"></p>
+          </div>
+
           <details id="devFacts" class="disclosure" hidden>
             <summary>Board details</summary>
             <dl class="facts disclosure-body">
@@ -84,15 +101,14 @@
           <details id="wifiTransportPanel" class="disclosure" hidden>
             <summary>How to connect a new board</summary>
             <div class="disclosure-body">
-              <p class="note">Do this once per board. After it joins your Wi-Fi, this page finds it on its own.</p>
+              <p class="note">Do this once per board. After it joins your Wi-Fi, every update is wireless, from any browser.</p>
               <ol class="steps">
                 <li>Install the base firmware over USB from the <a href="install.html">USB install</a> page, then power the board.</li>
-                <li>With the firmware running, hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it. Do not press RST.</li>
-                <li>On your phone or laptop, join the Wi-Fi network <code>Atech-OTA-D2-&lt;suffix&gt;</code>. The suffix is the board's pairing code. The Wi-Fi password and the OTA authorization code are printed on the serial console at boot (the USB install page shows it). Stay connected if your device warns that the network has no Internet.</li>
-                <li>Open <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a> and enter the OTA authorization code.</li>
-                <li>Tap Scan, choose your 2.4 GHz home network, enter its password and tap <strong>Join this network</strong>. The page shows the board's new IP address.</li>
-                <li>Back here, click <strong>Find devices</strong> and pair the board with the same code.</li>
+                <li>In desktop Chrome or Edge, click <strong>Connect Bluetooth</strong> above and pick the board.</li>
+                <li>In <strong>Wi-Fi setup</strong>, click Scan, choose your 2.4 GHz network, enter its password and click <strong>Join Wi-Fi</strong>. The password goes to the board over an encrypted Bluetooth session and nowhere else. The board is claimed for you automatically.</li>
+                <li>Once the board shows as online, it stays reachable through the cloud from any browser, including Safari and your phone.</li>
               </ol>
+              <p class="hint">No Bluetooth? The board has a hotspot page as a backup: hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it (do not press RST); join the Wi-Fi network <code>Atech-OTA-D2-&lt;suffix&gt;</code> (the suffix is the board's pairing code; the hotspot password and the OTA authorization code are printed on the serial console at boot); open <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a>, enter the OTA authorization code, tap Scan, choose your network and tap <strong>Join this network</strong>. On a local backend, click <strong>Find devices</strong> afterwards and pair the board with the same code.</p>
               <p class="hint">No Wi-Fi or Bluetooth path at all? Download the firmware in step 3, open the board's hotspot page the same way, choose that <code>firmware.bin</code> and tap Deploy Firmware. This dashboard does not fetch or upload over the hotspot. Disconnect any active Bluetooth session first.</p>
             </div>
           </details>
@@ -246,7 +262,8 @@
 
   <script src="/shared/atech-config.js?v=1"></script>
   <script src="/shared/atech-identity.js?v=4"></script>
-  <script src="/shared/atech-builder.js?v=5"></script>
+  <script src="/shared/atech-provision.js?v=1"></script>
+  <script src="/shared/atech-builder.js?v=6"></script>
   <script src="bleota-client.js?v=4"></script>
   <script src="app.js?v=4"></script>
 </body>

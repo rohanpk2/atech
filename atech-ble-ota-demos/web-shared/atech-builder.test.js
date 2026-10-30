@@ -21,7 +21,9 @@ const KNOWN_IDS = new Set(['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSumm
   // cloud: claim a registered board by id and pairing token
   'devClaimOpen', 'devClaimForm', 'devClaimId', 'devClaimToken', 'devClaimName', 'devClaim',
   // the first method card is relabelled Cloud Wi-Fi for a cloud-registered board
-  'methodWifi']);
+  'methodWifi',
+  // Wi-Fi setup over Bluetooth (step 1)
+  'provPanel', 'provState', 'provSsid', 'provNetworks', 'provPassword', 'provScan', 'provJoin', 'provForget', 'provProgress', 'provHint']);
 const referenced = [...source.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]);
 assert.ok(referenced.length > 10, 'module must address the builder card by element id');
 assert.deepEqual(referenced.filter(id => !KNOWN_IDS.has(id)), [], 'every referenced id must be documented');

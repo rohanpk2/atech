@@ -1066,6 +1066,7 @@ bool AtechWifiLan::forgetCredentials() {
 }
 
 String AtechWifiLan::configuredSsid() const { return _impl ? _impl->storedSsid : String(); }
+int AtechWifiLan::lastDisconnectReason() const { return _impl ? _impl->lastDisconnectReason : 0; }
 bool AtechWifiLan::isConnected() const { return _impl && _impl->stationWanted && _impl->gotIp; }
 bool AtechWifiLan::stationEnabled() const { return _impl && _impl->stationWanted; }
 IPAddress AtechWifiLan::ip() const { return isConnected() ? WiFi.localIP() : IPAddress(); }
@@ -1109,6 +1110,32 @@ String AtechWifiLan::scanJson() {
   WiFi.scanDelete();
   if (before != WiFi.getMode()) _impl->applyMode();
   return json;
+}
+
+String AtechWifiLan::scanLines(size_t maxNetworks) {
+  if (!_impl) return String();
+  const wifi_mode_t before = WiFi.getMode();
+  if (before != WIFI_STA && before != WIFI_AP_STA) WiFi.mode(before == WIFI_AP ? WIFI_AP_STA : WIFI_STA);
+  const int16_t count = WiFi.scanNetworks(false, false, false, 120);
+  String lines;
+  size_t emitted = 0;
+  for (int16_t i = 0; i < count && emitted < maxNetworks; ++i) {
+    const String ssid = WiFi.SSID(i);
+    if (ssid.isEmpty() || ssid.indexOf('\t') >= 0 || ssid.indexOf('\n') >= 0) continue;
+    bool duplicate = false;
+    for (int16_t j = 0; j < i; ++j) if (WiFi.SSID(j) == ssid) { duplicate = true; break; }
+    if (duplicate) continue;
+    int32_t bestRssi = WiFi.RSSI(i);
+    wifi_auth_mode_t auth = WiFi.encryptionType(i);
+    for (int16_t j = i + 1; j < count; ++j) {
+      if (WiFi.SSID(j) == ssid && WiFi.RSSI(j) > bestRssi) { bestRssi = WiFi.RSSI(j); auth = WiFi.encryptionType(j); }
+    }
+    lines += ssid; lines += '\t'; lines += String(bestRssi); lines += '\t'; lines += auth == WIFI_AUTH_OPEN ? '1' : '0'; lines += '\n';
+    ++emitted;
+  }
+  WiFi.scanDelete();
+  if (before != WiFi.getMode()) _impl->applyMode();
+  return lines;
 }
 
 void AtechWifiLan::setSoftApActive(bool active) {

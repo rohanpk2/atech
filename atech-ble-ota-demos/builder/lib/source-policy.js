@@ -35,6 +35,7 @@ const FORBIDDEN_APIS = [
   [/\btimerBegin\s*\(|\bhw_timer_t\b/, 'hardware timers'],
   [/\btouchRead\s*\(/, 'touch sensing'],
   [/\batech::core\w*/, 'core lifecycle functions'],
+  [/\bAtech(BleProv|CloudOta|WifiLan|WifiOta|Core|ImageSink)\w*/, 'the protected core libraries (Bluetooth setup, cloud OTA, Wi-Fi, identity)'],
 ];
 
 const GPIO_CALLS = /\b(pinMode|digitalWrite|digitalRead|analogRead|analogWrite|ledcAttach|ledcWrite|attachInterrupt)\s*\(\s*(\d+)\s*[,)]/g;

@@ -78,7 +78,9 @@ RUN cd builder && npm ci --include=dev --no-audit --no-fund && npm test \
  && node demo2-bleota-library/web/dashboard.test.js \
  && node shared/AtechCore/core.test.js \
  && node shared/AtechWifiOta/portal.test.js \
- && cd web-shared && node atech-identity.test.js && node atech-builder.test.js \
+ && node shared/AtechCloudOta/agent.test.js \
+ && node shared/AtechBleProv/prov.test.js \
+ && cd web-shared && node atech-identity.test.js && node atech-builder.test.js && node atech-provision.test.js \
  && cd /app && node --test "deploy/*.test.js"
 
 # ---------------------------------------------------------------------------------------------

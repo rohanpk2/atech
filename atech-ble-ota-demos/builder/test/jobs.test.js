@@ -169,3 +169,30 @@ test('an image without the cloud agent marker fails validation', async () => {
   assert.match(done.error, /ATECH-CLOUD-AGENT/);
   assert.equal(done.firmware, null);
 });
+
+test('a stock-app job compiles the checked-in user_app.cpp without calling the model', async () => {
+  const {store, provider, config} = makeStore({responses: []});
+  const job = store.createStock({demo: 1, ownerId: 'alice'});
+  assert.equal(job.static, 'stock');
+  assert.equal(job.prompt, 'stock app');
+  assert.equal(job.appName, 'green default');
+  assert.equal(job.ownerId, 'alice');
+  assert.match(job.summary, /quick green blink/);
+  const stock = fs.readFileSync(path.join(config.demos[1].dir, 'src', 'app', 'user_app.cpp'), 'utf8');
+  assert.equal(job.code, stock);
+  const done = await store.run(job.id);
+  assert.equal(done.state, 'ready', done.error);
+  assert.equal(done.appName, 'green default');
+  assert.equal(done.code, stock);
+  assert.equal(provider.calls.length, 0, 'the model is never consulted for a stock job');
+  assert.ok(fs.existsSync(path.join(config.buildsDir, 'jobs', job.id, 'firmware.bin')));
+  assert.throws(() => store.createStock({demo: 9}), /demo/);
+});
+
+test('an image without the provisioning service marker fails validation', async () => {
+  const {store} = makeStore({responses: [ok()], compileResults: [{ok: true, withProvMarker: false}]});
+  const done = await store.run(store.create({demo: 1, prompt: 'Blink'}).id);
+  assert.equal(done.state, 'failed');
+  assert.match(done.error, /ATECH-PROV/);
+  assert.equal(done.firmware, null);
+});

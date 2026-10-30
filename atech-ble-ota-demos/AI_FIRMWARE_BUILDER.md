@@ -86,7 +86,8 @@ Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need ei
 | --- | --- |
 | `GET /api/health` | provider, model, PlatformIO version, LAN URLs |
 | `GET /api/demos/:demo` | BLE/SSID prefixes, slot size, GPIO policy |
-| `POST /api/builds` `{demo, prompt, deviceId?}` | start a job (202 with `id`, `buildId`, `appVersion`) |
+| `POST /api/builds` `{demo, prompt, deviceId?}` | start a job (202 with `id`, `buildId`, `appVersion`); owned by the caller |
+| `POST /api/builds/stock` `{demo}` | the checked-in stock app as a job (quick green blink, no model): the static v1 to v2 image for verifying the cloud path |
 | `GET /api/builds?demo=` | recent jobs |
 | `GET /api/builds/:id` | job JSON (state, attempt, code, diagnostics, violations, firmware size/CRC32/SHA-256) |
 | `GET /api/builds/:id/events` | SSE stream of job updates, ends with `event: done` |
@@ -94,11 +95,11 @@ Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need ei
 | `POST /api/builds/:id/deployed` | record a deployment result for the audit trail |
 | `POST /api/builds/:id/deploy` `{deviceId, via?}` | start a deployment: over the LAN to a paired board, or `via: "cloud"` as a job the board pulls (202 with `id`, `transport`) |
 | `GET /api/deployments`, `/:id`, `/:id/events`; `POST /:id/abort` | deployment state, SSE stream, abort (LAN) or cancel while pending (cloud) |
-| `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/claim`, `/:id/probe`, `/:id/control`; `DELETE /:id` | device registry: LAN pairing (WIFI_LAN_OTA.md), cloud claiming by id and pairing token, `unclaimed` boards waiting; owner-scoped |
+| `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/claim`, `/:id/probe`, `/:id/control`, `/:id/provision-grant`; `DELETE /:id` | device registry: LAN pairing (WIFI_LAN_OTA.md), cloud claiming by id and pairing token, `unclaimed` boards waiting, the owner grant for Bluetooth Wi-Fi setup of an owned board (WIFI_BLE_ONBOARDING.md); owner-scoped |
 | `GET /api/device/challenge`, `POST /api/device/login`, `/poll`, `GET /api/device/jobs/:id/firmware`, `POST /api/device/jobs/:id/status` | the board-facing API (no dashboard key; see CLOUD_WIFI_OTA.md) |
 | `GET /api/installer/:demo/manifest.json`, `/parts/:name`, `/status`; `POST /api/installer/:demo/build` | ESP Web Tools |
 
-Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend binds to 127.0.0.1 by default and then needs no authentication; on any other address (a phone on the LAN, the Docker deployment) every `/api/*` request must carry the dashboard key, see [deploy/README.md](deploy/README.md).
+Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Every build route is scoped to the dashboard user that created the build (`ownerId`); builds from before ownership existed stay visible to everyone. Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend binds to 127.0.0.1 by default and then needs no authentication; on any other address (a phone on the LAN, the Docker deployment) every `/api/*` request must carry the dashboard key, see [deploy/README.md](deploy/README.md).
 
 ## Layout
 

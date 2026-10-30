@@ -42,6 +42,7 @@ public:
   bool saveCredentials(const String &ssid, const String &password);
   bool forgetCredentials();
   String configuredSsid() const;
+  int lastDisconnectReason() const;   // wifi_err_reason_t of the last station disconnect, 0 when none
 
   // Station state.
   bool isConnected() const;
@@ -51,7 +52,10 @@ public:
   String hostname() const;
   uint16_t port() const;
   String statusJson() const;       // for the portal and the identity endpoint
-  String scanJson();               // blocking scan of 2.4 GHz networks
+  String scanJson();
+  // The same scan as compact text lines "ssid<TAB>rssi<TAB>open" (strongest first, one per SSID)
+  // for the Bluetooth provisioning service, at most maxNetworks entries.
+  String scanLines(size_t maxNetworks = 12);               // blocking scan of 2.4 GHz networks
 
   // Wi-Fi mode arbitration with the hotspot portal: AP + STA when both are
   // wanted, STA only otherwise, off when nothing is wanted.

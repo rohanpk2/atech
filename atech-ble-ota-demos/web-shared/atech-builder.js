@@ -46,6 +46,10 @@
   };
   const DEVICE_ID = /^ATECH-[0-9A-F]{12}$/;
   const KEY_STORAGE = 'atechBuilderKey';
+  // Wi-Fi setup over Bluetooth: how often the board's status is read while it joins, and how
+  // long a join is given before the dashboard stops waiting for it.
+  const PROV_POLL_MS = 1500;
+  const PROV_JOIN_TIMEOUT_MS = 45000;
 
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -126,6 +130,7 @@
     const hosted = Boolean(cfg.hosted);
     const pollMs = Number(cfg.pollMs) || POLL_MS;
     const devicePollMs = hosted ? HOSTED_DEVICE_POLL_MS : DEVICE_POLL_MS;
+    const provPollMs = Number(cfg.provPollMs) || PROV_POLL_MS;
     function apiUrl(path) { return apiBase + path; }
     const reach = device => deviceVia(device, hosted);
     // Hosted: the proxy adds the backend key itself, so a key left in this browser by an old
@@ -139,6 +144,9 @@
       lastFailure: null,       // {method, message}
       lastVerified: false,     // the current build has been deployed and verified
       bleProgress: null,
+      publicUrl: null,         // the backend's public origin, provisioned into boards as the cloud server
+      // Wi-Fi setup over Bluetooth: one encrypted session per connection, the board's last status.
+      prov: {session: null, status: null, busy: false, timer: null, joinUntil: 0, ticks: 0},
     };
     try { state.selectedDeviceId = win.localStorage.getItem(`atechDevice${demo}`); } catch (_) { /* ignore */ }
 
@@ -387,6 +395,280 @@
       $('aiConfirm').hidden = !(identity && identity.pending && canControl);
       $('aiRollback').hidden = !(identity && identity.canRollback && canControl);
       renderDeviceList();
+      renderProv();
+    }
+
+    // ---------------------------------------------------------------- Wi-Fi setup over Bluetooth
+    // The transport exposes `provisioning` when the connected board has the provisioning service:
+    // {available(), session() -> AtechProvision session, readStatus() -> status JSON}. The Wi-Fi
+    // password goes into one encrypted request and nowhere else: not the log, not storage, not the
+    // backend. The board's token comes back inside the same session and is used once, to claim.
+    function provisioning() {
+      const hook = transport.provisioning;
+      if (!hook || typeof hook.available !== 'function' || !hook.available() || !transport.isConnected()) return null;
+      return hook;
+    }
+
+    function provSession() {
+      const hook = provisioning();
+      if (!hook) throw new Error('Connect the board over Bluetooth first');
+      if (!state.prov.session) state.prov.session = hook.session();
+      return state.prov.session;
+    }
+
+    function dropProvSession() {
+      if (!state.prov.session) return;
+      try { state.prov.session.close(); } catch (_) { /* ignore */ }
+      state.prov.session = null;
+    }
+
+    function cloudWords(cloud) {
+      if (!cloud) return 'unknown';
+      if (cloud.session) return 'online';
+      switch (cloud.state) {
+        case 'unclaimed': return 'waiting to be claimed';
+        case 'waiting_wifi': return 'waiting for Wi-Fi';
+        case 'disabled': return cloud.url ? 'starting' : 'not set up';
+        case 'error': return cloud.last_error ? `error: ${cloud.last_error}` : 'error';
+        default: return cloud.state || 'unknown';
+      }
+    }
+
+    function stopProvPolling() {
+      if (state.prov.timer) { clearInterval(state.prov.timer); state.prov.timer = null; }
+    }
+
+    function startProvPolling() {
+      if (state.prov.timer) return;
+      state.prov.ticks = 0;
+      state.prov.timer = setInterval(() => {
+        // Every tick while a join is in progress, every fourth tick otherwise.
+        const joining = state.prov.joinUntil > Date.now();
+        if (!joining && (++state.prov.ticks % 4) !== 0) return;
+        pollProvStatus().catch(() => {});
+      }, provPollMs);
+      pollProvStatus().catch(() => {});
+    }
+
+    // A Bluetooth transfer owns the link: no status reads are interleaved with the OTA stream
+    // (Android Chrome allows one GATT operation at a time; the board's host task stays free).
+    function transferInFlight() {
+      return state.busy || Boolean(typeof transport.transferring === 'function' && transport.transferring());
+    }
+
+    async function pollProvStatus() {
+      const hook = provisioning();
+      if (!hook) { renderProv(); return; }
+      if (state.prov.busy || transferInFlight()) return;
+      try { state.prov.status = await hook.readStatus(); }
+      catch (_) { /* keep the previous status; the next tick tries again */ }
+      const s = state.prov.status;
+      if (s && state.prov.joinUntil) {
+        const settled = s.wifi.connected || (s.wifi.reason && !s.wifi.connected);
+        if (settled || Date.now() > state.prov.joinUntil) {
+          state.prov.joinUntil = 0;
+          if (s.wifi.connected) log(`Board joined ${s.wifi.ssid} as ${s.wifi.ip}; cloud ${cloudWords(s.cloud)}.`, 'BLUETOOTH', 'success');
+          else if (s.wifi.reason) log(`Board could not join ${s.wifi.ssid} (reason ${s.wifi.reason}).`, 'BLUETOOTH', 'error');
+          else log('The board did not report a Wi-Fi join within 45 s; it keeps trying on its own.', 'BLUETOOTH', 'warn');
+          refreshDevices({probe: !hosted}).catch(() => {});
+        }
+      }
+      renderProv();
+    }
+
+    function renderProv() {
+      const panel = $('provPanel');
+      if (!panel) return;
+      const hook = provisioning();
+      if (!hook) {
+        panel.hidden = true;
+        stopProvPolling();
+        dropProvSession();
+        state.prov.status = null;
+        state.prov.joinUntil = 0;
+        return;
+      }
+      panel.hidden = false;
+      const s = state.prov.status;
+      const joining = state.prov.joinUntil > Date.now();
+      let text;
+      let tone = 'neutral';
+      if (!s) {
+        text = 'Checking the board\'s Wi-Fi.';
+      } else if (s.wifi.connected) {
+        text = `On ${s.wifi.ssid || 'Wi-Fi'} (${s.wifi.ip}), cloud ${cloudWords(s.cloud)}.`;
+        tone = s.cloud.session ? 'success' : 'neutral';
+      } else if (s.wifi.configured && s.wifi.reason && !joining) {
+        text = `Could not join ${s.wifi.ssid} (reason ${s.wifi.reason}). Check the password and try again.`;
+        tone = 'error';
+      } else if (s.wifi.configured) {
+        text = `Joining ${s.wifi.ssid}.`;
+        tone = 'working';
+      } else {
+        text = 'Not on Wi-Fi yet. Enter your 2.4 GHz network and its password.';
+      }
+      if (s && s.busy) text += ' The board is busy with an update.';
+      $('provState').textContent = text;
+      $('provState').className = `state ${tone}`;
+      $('provProgress').hidden = !(state.prov.busy || (joining && !(s && s.wifi.connected)));
+      $('provJoin').disabled = state.prov.busy;
+      $('provScan').disabled = state.prov.busy;
+      $('provForget').hidden = !(s && s.wifi.configured) || state.prov.busy;
+      startProvPolling();
+    }
+
+    function provBoardId() {
+      if (state.prov.status && DEVICE_ID.test(state.prov.status.id || '')) return state.prov.status.id;
+      const identity = transport.identity();
+      return identity && DEVICE_ID.test(identity.id) ? identity.id : null;
+    }
+
+    // The owner grant for an owned board: minted by the backend for the board's owner only.
+    async function provGrant(id, hello) {
+      const response = await api(`/api/devices/${id}/provision-grant`, {method: 'POST', headers: {'content-type': 'application/json'},
+                                                                        body: JSON.stringify({nonce: hello.nonce, transcript: hello.transcript})});
+      let body = {};
+      try { body = await response.json(); } catch (_) { body = {}; }
+      if (response.ok && body.grant) return {grant: body.grant, denied: null};
+      return {grant: null, denied: body.error || `HTTP ${response.status}`};
+    }
+
+    async function scanWifi() {
+      if (!provisioning() || state.prov.busy) return;
+      state.prov.busy = true;
+      $('provHint').textContent = 'Looking for networks nearby.';
+      renderProv();
+      try {
+        const networks = await provSession().scan();
+        const list = $('provNetworks');
+        list.replaceChildren();
+        for (const network of networks) {
+          const option = doc.createElement('option');
+          option.value = network.ssid;
+          option.label = `${network.rssi} dBm${network.open ? ', open' : ''}`;
+          list.append(option);
+        }
+        $('provHint').textContent = networks.length
+          ? `${networks.length} network${networks.length === 1 ? '' : 's'} found. Pick yours, enter its password and click Join Wi-Fi.`
+          : 'No 2.4 GHz network found nearby. Type the network name.';
+        if (networks.length && !$('provSsid').value) $('provSsid').value = networks[0].ssid;
+      } catch (error) {
+        $('provHint').textContent = `Scan failed: ${error.message}`;
+        dropProvSession();
+      } finally {
+        state.prov.busy = false;
+        renderProv();
+      }
+    }
+
+    async function joinWifi() {
+      const hook = provisioning();
+      if (!hook || state.prov.busy) return;
+      const ssid = $('provSsid').value.trim();
+      const secret = $('provPassword').value;
+      if (!ssid || ssid.length > 32) { $('provHint').textContent = 'Enter the network name (1 to 32 characters).'; $('provSsid').focus(); return; }
+      if (secret && (secret.length < 8 || secret.length > 63)) {
+        $('provHint').textContent = 'Wi-Fi password must contain 8 to 63 characters (or be empty for an open network).';
+        $('provPassword').focus();
+        return;
+      }
+      state.prov.busy = true;
+      $('provHint').textContent = '';
+      renderProv();
+      try {
+        const session = provSession();
+        const hello = await session.hello();
+        const id = provBoardId();
+        // Claim unless this dashboard user already owns the board: a record without an owner
+        // (paired over the LAN before ownership existed) is claimed so it gets one.
+        const known = id ? state.devices.find(d => d.id === id && d.paired && d.ownerId != null) : null;
+        const payload = {ssid, pass: secret, claim: !known};
+        if (state.publicUrl) payload.url = state.publicUrl;
+        let denied = null;
+        if (hello.locked && id) {
+          const result = await provGrant(id, hello);
+          if (result.grant) payload.grant = result.grant; else denied = result.denied;
+        }
+        if (hello.locked && !payload.grant) {
+          // Only a fresh BOOT press lets the board accept this; otherwise the password stays here.
+          let fresh = null;
+          try { fresh = await hook.readStatus(); } catch (_) { fresh = null; }
+          if (!(fresh && Number(fresh.unlock_ms) > 0)) {
+            $('provPassword').value = '';
+            $('provHint').textContent = `${denied ? `${denied}. ` : ''}This board already has an owner. Press the BOOT button on the board once, then click Join Wi-Fi again within two minutes.`;
+            log('Wi-Fi setup not sent: the board has another owner and no BOOT press was seen.', 'BLUETOOTH', 'warn');
+            return;
+          }
+        }
+        $('provPassword').value = '';
+        const reply = await session.provision(payload);
+        payload.pass = null;
+        if (!reply.ok) {
+          const error = reply.error || 'The board refused the request';
+          $('provHint').textContent = /locked/i.test(error)
+            ? `${denied ? `${denied}. ` : ''}Press the BOOT button on the board once, then click Join Wi-Fi again within two minutes.`
+            : error;
+          log(`Wi-Fi setup refused by the board: ${error}.`, 'BLUETOOTH', 'error');
+          return;
+        }
+        state.prov.joinUntil = Date.now() + PROV_JOIN_TIMEOUT_MS;
+        log(`Wi-Fi credentials for ${ssid} sent to the board over Bluetooth${payload.url ? ', with the build service address' : ''}.`, 'BLUETOOTH', 'success');
+        $('provHint').textContent = state.publicUrl ? '' : 'The build service has no public address (ATECH_PUBLIC_URL), so this board cannot reach it for cloud deployments yet.';
+        if (reply.token && id) {
+          const response = await api('/api/devices/claim', {method: 'POST', headers: {'content-type': 'application/json'},
+                                                             body: JSON.stringify({id, token: reply.token, name: ''})});
+          let body = {};
+          try { body = await response.json(); } catch (_) { body = {}; }
+          if (response.ok) {
+            log(`Claimed ${id} in this dashboard; it is verified at the board's first cloud login.`, 'BACKEND', 'success');
+            chooseDevice(id, {persist: true});
+            await refreshDevices({probe: false});
+          } else {
+            $('provHint').textContent = `The board joined, but claiming it failed: ${body.error || `HTTP ${response.status}`}`;
+            log(`Claim failed: ${body.error || response.status}`, 'BACKEND', 'error');
+          }
+        }
+      } catch (error) {
+        $('provHint').textContent = `Wi-Fi setup failed: ${error.message}`;
+        log(`Wi-Fi setup failed: ${error.message}`, 'BLUETOOTH', 'error');
+        dropProvSession();
+      } finally {
+        $('provPassword').value = '';
+        state.prov.busy = false;
+        renderProv();
+        pollProvStatus().catch(() => {});
+      }
+    }
+
+    async function forgetWifi() {
+      if (!provisioning() || state.prov.busy) return;
+      if (!state.armedForgetWifi || Date.now() - state.armedForgetWifi > 6000) {
+        state.armedForgetWifi = Date.now();
+        $('provForget').textContent = 'Click again to forget Wi-Fi';
+        setTimeout(() => { state.armedForgetWifi = null; $('provForget').textContent = 'Forget Wi-Fi'; }, 6000);
+        return;
+      }
+      state.armedForgetWifi = null;
+      $('provForget').textContent = 'Forget Wi-Fi';
+      state.prov.busy = true;
+      renderProv();
+      try {
+        const session = provSession();
+        const hello = await session.hello();
+        const payload = {wifi: true};
+        const id = provBoardId();
+        if (hello.locked && id) { const result = await provGrant(id, hello); if (result.grant) payload.grant = result.grant; }
+        const reply = await session.forget(payload);
+        $('provHint').textContent = reply.ok ? 'The board forgot its Wi-Fi.' : /locked/i.test(reply.error || '') ? 'Press the BOOT button on the board once, then try again.' : reply.error;
+        log(reply.ok ? 'Board forgot its Wi-Fi credentials.' : `Forget refused: ${reply.error}`, 'BLUETOOTH', reply.ok ? 'success' : 'error');
+      } catch (error) {
+        $('provHint').textContent = `Could not forget Wi-Fi: ${error.message}`;
+        dropProvSession();
+      } finally {
+        state.prov.busy = false;
+        renderProv();
+        pollProvStatus().catch(() => {});
+      }
     }
 
     function renderDeviceList() {
@@ -1021,6 +1303,7 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const health = await response.json();
         state.backendOk = true;
+        state.publicUrl = (health.cloud && health.cloud.publicUrl) || null;
         $('aiBackend').textContent = `Backend online: ${health.provider || 'no provider'} (${health.model || 'no model'})`;
         $('aiBackend').className = 'ai-backend ok';
       } catch (error) {
@@ -1237,6 +1520,10 @@
     $('devClaim').addEventListener('click', () => { claimDevice(); });
     $('devClaimToken').addEventListener('keydown', event => { if (event.key === 'Enter') claimDevice(); });
     $('devForget').addEventListener('click', () => { forgetDevice(); });
+    $('provScan').addEventListener('click', () => { scanWifi(); });
+    $('provJoin').addEventListener('click', () => { joinWifi(); });
+    $('provForget').addEventListener('click', () => { forgetWifi(); });
+    $('provPassword').addEventListener('keydown', event => { if (event.key === 'Enter') joinWifi(); });
     for (const method of ['wifi', 'ble', 'hotspot']) {
       $(`method${method[0].toUpperCase()}${method.slice(1)}`).addEventListener('click', () => {
         if (state.busy) return;

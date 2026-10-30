@@ -16,6 +16,17 @@ function proofHex(secret, {deviceId, nonce}) {
   return hmacHex(secret, loginMessage({deviceId, nonce}));
 }
 
+// Owner grant for Bluetooth provisioning of a claimed board (shared/AtechBleProv checks the same
+// string): the session nonce the board issued and the SHA-256 of both ECDH public keys, so a
+// grant is bound to one authenticated key exchange.
+function provisionGrantMessage({deviceId, nonce, transcript}) {
+  return `atech-prov-grant/1\n${deviceId}\n${String(nonce).toLowerCase()}\n${String(transcript).toLowerCase()}\n`;
+}
+
+function provisionGrantHex(secret, {deviceId, nonce, transcript}) {
+  return hmacHex(secret, provisionGrantMessage({deviceId, nonce, transcript}));
+}
+
 // One key=value per line. Values are flattened to a single line; booleans
 // become 1/0; null and undefined become the empty string.
 function encodeKv(object) {
@@ -59,4 +70,4 @@ class CloudError extends Error {
   }
 }
 
-module.exports = {PROTOCOL, loginMessage, proofHex, encodeKv, parseKv, parseForm, newSessionToken, newJobId, CloudError};
+module.exports = {PROTOCOL, loginMessage, proofHex, provisionGrantMessage, provisionGrantHex, encodeKv, parseKv, parseForm, newSessionToken, newJobId, CloudError};

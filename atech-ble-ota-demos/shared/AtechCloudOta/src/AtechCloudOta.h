@@ -44,6 +44,7 @@ public:
   bool isEnabled() const;         // a server URL is configured
   bool isTransferring() const;    // a job owns flash right now
   bool holdsConfirm() const;      // a cloud-deployed image awaits the backend's acknowledgment
+  bool hasSession() const;        // logged in to the backend right now (the backend holds this board's token)
 
   // Server URL: the hotspot portal stores one in NVS; otherwise the compiled-in default.
   String serverUrl() const;
