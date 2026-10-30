@@ -2,6 +2,10 @@
 
 **Status (2026-10-28):** implemented and compiled for both demos (`base`, `updated`, `ai`), covered by automated tests against a protocol-accurate simulated board, and driven end to end in Chrome against that simulated board. **No ESP32-S3 was attached during this work.** Nothing below was flashed, joined to a real Wi-Fi network, transferred over a real radio, rebooted, rolled back or timed on hardware. Every number in this document that comes from the simulation is labelled as such.
 
+**2026-10-29:** the hosted dashboard now has a cloud path for boards that are not on the backend's network:
+the board polls the backend over HTTPS and pulls the image itself. See [CLOUD_WIFI_OTA.md](CLOUD_WIFI_OTA.md).
+The LAN path below is unchanged and remains the fastest route when the backend runs on the same network.
+
 The target experience:
 
 **Power the ESP32 -> join it to Wi-Fi once -> open the Atech dashboard in Safari or Chrome -> type a prompt -> Generate -> Deploy -> the board runs the new firmware.**

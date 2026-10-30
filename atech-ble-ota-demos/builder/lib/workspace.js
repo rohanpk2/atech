@@ -13,7 +13,15 @@ const AI_ENV_BLOCK = '\n; AI firmware builder target (added by the backend).\n[e
                      'build_flags = ${env.build_flags} -DDEMO_VERSION=3 -DATECH_AI_BUILD=1\n';
 const GENERATED_FILES = new Set(['user_app.cpp', 'app_build.h']);
 
-function rewritePlatformioIni(ini, {sharedDir, cacheDir}) {
+// The build flag that tells the firmware's cloud agent where to report; quoted for PlatformIO's
+// shell-style build_flags parsing.
+function cloudUrlFlag(cloudUrl) {
+  return `'-DATECH_CLOUD_URL="${String(cloudUrl).replace(/["'\\\s]/g, '')}"'`;
+}
+
+// cloudUrl: the backend's public origin, baked into the [env:ai] build only; the stock
+// environments keep their defaults so the USB baseline is unaffected by a workspace rewrite.
+function rewritePlatformioIni(ini, {sharedDir, cacheDir, cloudUrl = null}) {
   let out = String(ini);
   if (/^lib_extra_dirs\s*=/m.test(out)) {
     out = out.replace(/^lib_extra_dirs\s*=.*$/m, `lib_extra_dirs = ${sharedDir}`);
@@ -25,7 +33,16 @@ function rewritePlatformioIni(ini, {sharedDir, cacheDir}) {
   } else {
     out = out.replace(/^\[env\]\s*$/m, `[env]\nbuild_cache_dir = ${cacheDir}`);
   }
+  // The post-build OTA size check lives in the shared directory; the workspace is elsewhere.
+  out = out.replace(/^extra_scripts\s*=\s*post:\.\.\/shared\/(.*)$/m, (_, rest) => `extra_scripts = post:${sharedDir}/${rest}`);
   if (!/^\[env:ai\]/m.test(out)) out = out.trimEnd() + '\n' + AI_ENV_BLOCK;
+  if (cloudUrl) {
+    const start = out.indexOf('[env:ai]');
+    const next = out.indexOf('\n[', start + 1);
+    const section = next < 0 ? out.slice(start) : out.slice(start, next);
+    const patched = section.replace(/^(build_flags\s*=.*)$/m, (line) => `${line} ${cloudUrlFlag(cloudUrl)}`);
+    out = out.slice(0, start) + patched + (next < 0 ? '' : out.slice(next));
+  }
   return out;
 }
 
@@ -64,7 +81,8 @@ async function prepareWorkspace(demo, {code, meta}, {config = loadConfig()} = {}
   const ini = await fsp.readFile(path.join(entry.dir, 'platformio.ini'), 'utf8');
   await fsp.writeFile(path.join(dir, 'platformio.ini'),
                       rewritePlatformioIni(ini, {sharedDir: config.sharedDir,
-                                                 cacheDir: path.join(config.buildsDir, 'cache')}));
+                                                 cacheDir: path.join(config.buildsDir, 'cache'),
+                                                 cloudUrl: config.publicUrl || null}));
   await fsp.copyFile(path.join(entry.dir, 'partitions.csv'), path.join(dir, 'partitions.csv'));
   await fsp.cp(path.join(entry.dir, 'src'), srcDir, {
     recursive: true, force: true,
@@ -86,4 +104,4 @@ async function compileWorkspace(demo, dir, {config = loadConfig(), onLine, timeo
           firmwarePath: ok ? firmwarePath : null};
 }
 
-module.exports = {rewritePlatformioIni, renderAppBuildHeader, prepareWorkspace, compileWorkspace, workspaceDir};
+module.exports = {rewritePlatformioIni, renderAppBuildHeader, prepareWorkspace, compileWorkspace, workspaceDir, cloudUrlFlag};

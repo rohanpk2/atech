@@ -13,7 +13,11 @@ const gpio = require('./lib/gpio-policy');
 const {JobStore} = require('./lib/jobs');
 const {DeviceRegistry} = require('./lib/devices');
 const {DeploymentStore} = require('./lib/lan-ota');
+const {CloudDeviceService} = require('./lib/cloud-devices');
+const {CloudDeploymentStore} = require('./lib/cloud-ota');
+const {createDeviceHandler} = require('./lib/cloud-routes');
 const {createFakeDevice} = require('./lib/fake-device');
+const {createFakeCloudDevice} = require('./lib/fake-cloud-device');
 const installerModule = require('./lib/installer');
 const {selectProvider} = require('./lib/generate');
 const {runPio} = require('./lib/pio');
@@ -99,13 +103,42 @@ function keyPresented(req, url, key) {
   return false;
 }
 
-function createServer({config, jobs, devices = null, deployments = null, installer = installerModule, pioVersion = null, simulated = []}) {
+// The dashboard principal that owns boards and deployments. Behind the dashboard key the
+// proxy (Vercel) sets x-atech-user to the signed-in user; without a key, or when the key holder
+// sends no header (an operator on an SSH tunnel), everything belongs to "local".
+function principalOf(req, config) {
+  if (!config.dashboardKey) return 'local';
+  const header = String(req.headers['x-atech-user'] || '').trim();
+  return header ? header.slice(0, 64) : 'local';
+}
+
+function deploymentFinished(deployment) {
+  return deployment.transport === 'cloud' ? ['succeeded', 'failed', 'cancelled'].includes(deployment.state)
+                                          : ['verified', 'failed', 'aborted'].includes(deployment.state);
+}
+
+function createServer({config, jobs, devices = null, deployments = null, cloud = null, cloudDeployments = null, installer = installerModule,
+                       pioVersion = null, simulated = [], log = () => {}}) {
   const handlers = [];
   const route = (method, pattern, handler) => handlers.push({method, pattern, handler});
   devices = devices || new DeviceRegistry({config});
   deployments = deployments || new DeploymentStore({config, jobs, devices});
+  cloud = cloud || new CloudDeviceService({config, devices, log});
+  cloudDeployments = cloudDeployments || new CloudDeploymentStore({config, jobs, devices, cloud, log});
+  const deviceHandler = createDeviceHandler({cloud, cloudDeployments});
   let lastRefreshAt = 0;
   let refreshPromise = null;
+  const forbidden = res => sendJson(res, 403, {error: 'This board belongs to another dashboard user'});
+  const sendCloudError = (res, error) => sendJson(res, Number(error.status) || 500, {error: redactSecrets(error.message), code: error.code || 'error'});
+  // A deployment from either store, checked against the caller's principal for cloud jobs.
+  const findDeployment = (id, principal) => {
+    const lan = deployments.get(id);
+    if (lan) return {deployment: lan, store: 'lan'};
+    const job = cloudDeployments.get(id);
+    if (!job) return null;
+    if (job.ownerId != null && job.ownerId !== principal) return {forbidden: true};
+    return {deployment: job, store: 'cloud'};
+  };
 
   route('GET', /^\/api\/health$/, async (req, res) => {
     sendJson(res, 200, {
@@ -114,6 +147,8 @@ function createServer({config, jobs, devices = null, deployments = null, install
       demos: Object.values(config.demos).map(d => ({demo: d.demo, name: d.name, path: `/${d.key.split('-')[0]}/`})),
       maxRepairs: config.maxRepairs,
       lan: {chunkBytes: deployments.chunkBytes, devicePort: config.lanPort, simulated: simulated.map(s => ({id: s.state.id, demo: s.state.demo}))},
+      cloud: {publicUrl: config.publicUrl, pollMs: config.cloud.pollMs, jobTtlMs: config.cloud.jobTtlMs, offlineAfterMs: config.cloud.offlineAfterMs,
+              devicePath: '/api/device/'},
       keyRequired: Boolean(config.dashboardKey),
     });
   });
@@ -127,7 +162,23 @@ function createServer({config, jobs, devices = null, deployments = null, install
       }
       if (refreshPromise) await refreshPromise;
     }
-    sendJson(res, 200, {devices: devices.list(), refreshedAt: lastRefreshAt ? new Date(lastRefreshAt).toISOString() : null});
+    const principal = principalOf(req, config);
+    sendJson(res, 200, {devices: devices.list(principal), unclaimed: cloud.pendingRegistrations(),
+                        refreshedAt: lastRefreshAt ? new Date(lastRefreshAt).toISOString() : null});
+  });
+
+  // Claim a board for the caller with its id and pairing token (the OTA authorization code).
+  route('POST', /^\/api\/devices\/claim$/, async (req, res) => {
+    const body = await readJson(req);
+    const id = String(body.id || '').trim().toUpperCase();
+    const principal = principalOf(req, config);
+    const previous = devices.get(id);
+    try {
+      const device = await cloud.claim({id, token: body.token, name: body.name, ownerId: principal});
+      // A board that changes hands starts clean: no inherited jobs, no sessions from before.
+      if (previous && previous.ownerId !== principal) { cloudDeployments.cancelAllFor(id, 'The board was claimed by another dashboard user'); cloud.revokeSessions(id); }
+      sendJson(res, 200, {device});
+    } catch (error) { sendCloudError(res, error); }
   });
 
   route('POST', /^\/api\/devices\/discover$/, async (req, res) => {
@@ -139,13 +190,14 @@ function createServer({config, jobs, devices = null, deployments = null, install
     const body = await readJson(req);
     try {
       const device = await devices.pair({host: String(body.host || '').trim(), port: Number(body.port) || config.lanPort,
-                                         token: body.token, name: body.name});
+                                         token: body.token, name: body.name, ownerId: principalOf(req, config)});
       sendJson(res, 200, {device});
     } catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); }
   });
 
   route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/probe$/, async (req, res, [id]) => {
     const body = await readJson(req);
+    if (!devices.canAccess(id, principalOf(req, config))) { forbidden(res); return; }
     const record = devices.get(id);
     const host = String(body.host || (record && record.host) || '').trim();
     const port = Number(body.port) || (record && record.port) || config.lanPort;
@@ -158,53 +210,88 @@ function createServer({config, jobs, devices = null, deployments = null, install
   });
 
   route('DELETE', /^\/api\/devices\/(ATECH-[0-9A-F]{12})$/, async (req, res, [id]) => {
+    if (!devices.canAccess(id, principalOf(req, config))) { forbidden(res); return; }
+    // Forgetting a board also ends its queued jobs and logs it out of the cloud API.
+    cloudDeployments.cancelAllFor(id, 'The board was forgotten');
+    cloud.revokeSessions(id);
     sendJson(res, devices.remove(id) ? 200 : 404, {ok: true});
   });
 
   route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/control$/, async (req, res, [id]) => {
     const body = await readJson(req);
+    if (!devices.canAccess(id, principalOf(req, config))) { forbidden(res); return; }
     try { sendJson(res, 200, await devices.control(id, String(body.op || '').toLowerCase())); }
     catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); }
   });
 
-  // ---- deployments over the LAN ----
+  // ---- deployments: over the LAN (backend to board) or through the cloud (board pulls) ----
   route('POST', /^\/api\/builds\/([0-9a-f]+)\/deploy$/, async (req, res, [id]) => {
     const body = await readJson(req);
+    const deviceId = String(body.deviceId || '').trim();
+    const principal = principalOf(req, config);
+    const record = devices.get(deviceId);
+    if (record && !devices.canAccess(deviceId, principal)) { forbidden(res); return; }
+    const via = String(body.via || '').toLowerCase();
+    const useCloud = via === 'cloud' || (via !== 'lan' && record && !record.host && record.cloud);
+    if (useCloud) {
+      try {
+        const deployment = cloudDeployments.create({jobId: id, deviceId, ownerId: principal});
+        sendJson(res, 202, {id: deployment.id, deployment, transport: 'cloud'});
+      } catch (error) { sendCloudError(res, error); }
+      return;
+    }
     let deployment;
-    try { deployment = deployments.create({jobId: id, deviceId: String(body.deviceId || '').trim()}); }
+    try { deployment = deployments.create({jobId: id, deviceId}); }
     catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); return; }
     deployments.run(deployment.id).catch(() => {});
-    sendJson(res, 202, {id: deployment.id, deployment});
+    sendJson(res, 202, {id: deployment.id, deployment, transport: 'lan'});
   });
 
-  route('GET', /^\/api\/deployments$/, async (req, res) => { sendJson(res, 200, deployments.list()); });
+  route('GET', /^\/api\/deployments$/, async (req, res, [], url) => {
+    const principal = principalOf(req, config);
+    const deviceId = url.searchParams.get('deviceId') || null;
+    const all = [...deployments.list().filter(d => !deviceId || d.deviceId === deviceId), ...cloudDeployments.list({ownerId: principal, deviceId})];
+    sendJson(res, 200, all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)));
+  });
 
   route('GET', /^\/api\/deployments\/([0-9a-f]+)$/, async (req, res, [id]) => {
-    const deployment = deployments.get(id);
-    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
-    sendJson(res, 200, deployment);
+    const found = findDeployment(id, principalOf(req, config));
+    if (!found) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    if (found.forbidden) { forbidden(res); return; }
+    sendJson(res, 200, found.deployment);
   });
 
   route('POST', /^\/api\/deployments\/([0-9a-f]+)\/abort$/, async (req, res, [id]) => {
-    const deployment = deployments.abort(id);
-    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
-    sendJson(res, 200, deployment);
+    const found = findDeployment(id, principalOf(req, config));
+    if (!found) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    if (found.forbidden) { forbidden(res); return; }
+    if (found.store === 'cloud') {
+      try { sendJson(res, 200, cloudDeployments.cancel(id)); } catch (error) { sendCloudError(res, error); }
+      return;
+    }
+    sendJson(res, 200, deployments.abort(id));
   });
 
   route('GET', /^\/api\/deployments\/([0-9a-f]+)\/events$/, async (req, res, [id]) => {
-    const deployment = deployments.get(id);
-    if (!deployment) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    const found = findDeployment(id, principalOf(req, config));
+    if (!found) { sendJson(res, 404, {error: 'Unknown deployment'}); return; }
+    if (found.forbidden) { forbidden(res); return; }
+    const store = found.store === 'cloud' ? cloudDeployments : deployments;
     res.writeHead(200, {'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive'});
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    const finished = state => ['verified', 'failed', 'aborted'].includes(state);
     const finish = snapshot => { send('done', {state: snapshot.state}); res.end(); };
-    send('deployment', deployment);
-    if (finished(deployment.state)) { finish(deployment); return; }
-    const unsubscribe = deployments.subscribe(id, snapshot => {
+    send('deployment', found.deployment);
+    if (deploymentFinished(found.deployment)) { finish(found.deployment); return; }
+    const unsubscribe = store.subscribe(id, snapshot => {
       send('deployment', snapshot);
-      if (finished(snapshot.state)) { unsubscribe(); finish(snapshot); }
+      if (deploymentFinished(snapshot)) { unsubscribe(); finish(snapshot); }
     });
-    const keepAlive = setInterval(() => res.write(': ping\n\n'), 15000);
+    // A cloud job's offline flag is derived from the board's last contact, so the keep-alive
+    // tick resends the snapshot instead of an empty comment.
+    const keepAlive = setInterval(() => {
+      const current = store.get(id);
+      if (current && found.store === 'cloud') send('deployment', current); else res.write(': ping\n\n');
+    }, 15000);
     req.on('close', () => { clearInterval(keepAlive); unsubscribe(); });
   });
 
@@ -316,6 +403,8 @@ function createServer({config, jobs, devices = null, deployments = null, install
     const url = new URL(req.url, 'http://localhost');
     const pathname = url.pathname;
     try {
+      // Boards authenticate with their own credentials, never with the dashboard key.
+      if (pathname.startsWith('/api/device/')) { await deviceHandler(req, res, url); return; }
       if (pathname.startsWith('/api/') && !keyPresented(req, url, config.dashboardKey)) {
         sendJson(res, 401, {error: 'This builder requires its dashboard key. Open the link printed by the backend (it carries ?key=).', keyRequired: true});
         return;
@@ -336,6 +425,14 @@ function createServer({config, jobs, devices = null, deployments = null, install
       else res.end();
     }
   });
+  // A board keeps one TLS connection open between a firmware chunk and its status report; Node's
+  // 5 s default would close it between the two.
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
+  // Cloud job timeouts (expiry, stalled download, reboot and confirmation windows).
+  const ticker = setInterval(() => { try { cloudDeployments.tick(); } catch (error) { log(`cloud tick failed: ${redactSecrets(error.message)}`); } }, 5000);
+  ticker.unref();
+  server.on('close', () => clearInterval(ticker));
   return server;
 }
 
@@ -358,8 +455,10 @@ async function main() {
   if (!loopback && !config.dashboardKey) config.dashboardKey = crypto.randomBytes(12).toString('base64url');
   const devices = new DeviceRegistry({config});
   const deployments = new DeploymentStore({config, jobs, devices});
+  const cloud = new CloudDeviceService({config, devices, log: line => console.log(`  ${line}`)});
+  const cloudDeployments = new CloudDeploymentStore({config, jobs, devices, cloud, log: line => console.log(`  ${line}`)});
   const simulated = await startSimulatedDevices(config, devices);
-  const server = createServer({config, jobs, devices, deployments, pioVersion, simulated});
+  const server = createServer({config, jobs, devices, deployments, cloud, cloudDeployments, pioVersion, simulated, log: line => console.log(`  ${line}`)});
   server.on('error', error => {
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${config.port} on ${config.host} is already in use (an old "python3 -m http.server ${config.port}" ` +
@@ -385,8 +484,12 @@ async function main() {
     console.log(`  Demo 1:   http://localhost:${config.port}/demo1/${suffix}`);
     console.log(`  Demo 2:   http://localhost:${config.port}/demo2/${suffix}`);
     console.log(`  devices:  ${devices.list().length} paired (${devices.file})`);
+    console.log(`  cloud:    boards report to ${config.publicUrl || '(ATECH_PUBLIC_URL not set; generated firmware carries no server URL)'} ` +
+                `(/api/device/*, poll every ${config.cloud.pollMs / 1000} s, jobs expire after ${Math.round(config.cloud.jobTtlMs / 60000)} min)`);
+    // The simulated boards also run the cloud agent against this very backend (loopback).
+    attachSimulatedCloudAgents(simulated, {baseUrl: `http://127.0.0.1:${config.port}`, config});
     for (const sim of simulated) {
-      console.log(`  SIMULATED board ${sim.state.id} (Demo ${sim.state.demo}) at http://127.0.0.1:${sim.port}/api/identity; no hardware involved`);
+      console.log(`  SIMULATED board ${sim.state.id} (Demo ${sim.state.demo}) at http://127.0.0.1:${sim.port}/api/identity and polling the cloud API; no hardware involved`);
     }
     if (!loopback) {
       for (const url of lanUrls(config.port)) console.log(`  LAN:      ${url}/demo1/${suffix}  (Safari on iPhone/iPad: open this link; Wi-Fi deploy needs no Bluetooth)`);
@@ -398,8 +501,9 @@ async function main() {
 }
 
 // Simulated boards for hardware-free demos and browser testing. They run the
-// same protocol as the firmware but prove nothing about real ESP32 speed.
-async function startSimulatedDevices(config, devices) {
+// same protocols as the firmware (LAN service and, given a baseUrl, the cloud
+// agent against this backend) but prove nothing about real ESP32 speed.
+async function startSimulatedDevices(config, devices, {baseUrl = null, log = text => console.log(`  ${text}`)} = {}) {
   const spec = String(config.simulatedDevices || '').trim().toLowerCase();
   if (!spec || spec === '0' || spec === 'false') return [];
   const demos = spec === 'all' || spec === 'true' ? [1, 2] : spec.split(',').map(Number).filter(n => n === 1 || n === 2);
@@ -408,17 +512,33 @@ async function startSimulatedDevices(config, devices) {
     const id = `ATECH-51D0000000E${demo}`;
     const secret = `simulated-board-${demo}-authorization-code`;
     const device = createFakeDevice({id, demo, build: 'stock', secret, host: '127.0.0.1', port: 0, rebootMs: 1500,
-                                     log: text => console.log(`  [simulated ${id}] ${text}`)});
+                                     log: text => log(`[simulated ${id}] ${text}`)});
     const {host, port} = await device.start();
     devices.upsert({id, suffix: id.slice(-6), demo, name: `Simulated Demo ${demo} board`, host, port, hostname: `atech-${id.slice(-6).toLowerCase()}`,
-                    firmware: device.state.fw, build: 'stock', secret, simulated: true, pairedAt: new Date().toISOString()});
+                    firmware: device.state.fw, build: 'stock', secret, simulated: true, ownerId: null, pairedAt: new Date().toISOString()});
     started.push(device);
   }
+  if (baseUrl) attachSimulatedCloudAgents(started, {baseUrl, config, log});
   return started;
+}
+
+// Gives each simulated board a cloud agent that shares its state, so a deployment through
+// either path is visible through the other, exactly like one physical board.
+function attachSimulatedCloudAgents(simulated, {baseUrl, config, log = text => console.log(`  ${text}`)}) {
+  for (const device of simulated) {
+    if (device.cloudAgent) continue;
+    const {id, demo, secret} = device.state;
+    const agent = createFakeCloudDevice({id, demo, secret, baseUrl, state: device.state, pollMs: Math.min(config.cloud.pollMs, 5000),
+                                         chunkBytes: config.cloud.chunkBytes, log: text => log(`[simulated ${id} cloud] ${text}`)});
+    agent.start();
+    device.cloudAgent = agent;
+    const stopLan = device.stop;
+    device.stop = async () => { await agent.stop(); await stopLan(); };
+  }
 }
 
 if (require.main === module) {
   main().catch(error => { console.error(redactSecrets(error.message)); process.exit(1); });
 }
 
-module.exports = {createServer, safeJoin, keyPresented, startSimulatedDevices};
+module.exports = {createServer, safeJoin, keyPresented, principalOf, startSimulatedDevices, attachSimulatedCloudAgents};

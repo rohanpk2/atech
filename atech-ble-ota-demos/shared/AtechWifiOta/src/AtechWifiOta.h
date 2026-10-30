@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 class AtechWifiLan;
+class AtechCloudOta;
 
 struct AtechWifiOtaConfig {
   const char *deviceName;
@@ -25,6 +26,9 @@ struct AtechWifiOtaConfig {
   // provisioning card and runs the hotspot in AP+STA mode so the user can
   // watch the join succeed from the same page.
   AtechWifiLan *lan;
+  // Optional cloud OTA agent. When set, the portal gains the Cloud card (server URL and
+  // agent status) behind the same authorization code.
+  AtechCloudOta *cloud;
 };
 
 class AtechWifiOtaPortal {

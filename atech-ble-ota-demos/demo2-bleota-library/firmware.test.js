@@ -28,6 +28,8 @@ assert.doesNotMatch(main, /led\.setPixelColor/, 'LED rendering moved into the ap
 assert.doesNotMatch(main, /Adafruit_NeoPixel led/, 'the core owns the NeoPixel');
 assert.match(main, /BLEOTA\.process\(\)/, 'the gb88 protocol loop must stay untouched');
 assert.match(main, /wifiOta\.isUpdating\(\)/, 'the app pauses only during an active Wi-Fi upload');
+assert.match(main, /#include <AtechCloudOta\.h>/, 'the cloud OTA agent is part of every image');
+assert.match(main, /cloudOta\.isTransferring\(\)/, 'gb88 BLEOTA and the cloud agent never write flash at the same time');
 
 assert.match(userApp, /#include <AtechApp\.h>/);
 assert.match(userApp, /void appSetup\(\)/);

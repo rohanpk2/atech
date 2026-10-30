@@ -17,6 +17,8 @@ const STATES = ['queued', 'generating', 'compiling', 'repairing', 'validating', 
 const MAX_PROMPT = 4000;
 const LOG_TAIL_LINES = 40;
 const FIRST_AI_VERSION = 3;
+// Every image must carry the cloud OTA agent (shared/AtechCloudOta embeds this marker).
+const AGENT_MARKER = 'ATECH-CLOUD-AGENT:';
 
 function crc32(buf) {
   let crc = 0xFFFFFFFF;
@@ -239,7 +241,7 @@ class JobStore {
         const image = fs.readFileSync(compiled.firmwarePath);
         const validation = deps.validateImage(image, {
           slotSize: config.slotSize, sizeMargin: config.sizeMargin,
-          markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`],
+          markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER],
         });
         if (!validation.ok) throw new Error(`Image validation failed: ${validation.errors.join('; ')}`);
         const target = path.join(jobDir, 'firmware.bin');
@@ -257,4 +259,4 @@ class JobStore {
   }
 }
 
-module.exports = {JobStore, STATES, crc32};
+module.exports = {JobStore, STATES, crc32, AGENT_MARKER};

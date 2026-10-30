@@ -1,6 +1,6 @@
 {
   "name": "AtechWifiOta",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shared authenticated SoftAP browser OTA portal for the Atech ESP32-S3 demos",
   "frameworks": "arduino",
   "platforms": "espressif32",

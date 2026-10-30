@@ -28,7 +28,7 @@ void appLoop();
 
 namespace {
 
-constexpr char ATECH_CORE_VERSION[] = "1.1.0";
+constexpr char ATECH_CORE_VERSION[] = "1.2.0";
 constexpr char IDENTITY_SERVICE_UUID[] = "a7ec0100-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char IDENTITY_CHAR_UUID[] = "a7ec0101-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char CONTROL_CHAR_UUID[] = "a7ec0102-2e47-4dd2-82a4-9c2cf6eaa001";
@@ -274,6 +274,8 @@ void Led::off() { set(0, 0, 0); }
 
 const char *deviceId() { return deviceIdText; }
 const char *pairingSuffix() { return suffixText; }
+const char *buildId() { return config.buildId ? config.buildId : ""; }
+const char *coreVersion() { return ATECH_CORE_VERSION; }
 
 String bleName(const char *prefix) {
   return String(prefix ? prefix : "Atech") + "-" + suffixText;
@@ -411,7 +413,10 @@ void coreLoop() {
   // Confirm a pending image only once the generated app has provably run:
   // appSetup() returned and appLoop() completed at least once. A hung or
   // crashing app therefore never cancels the bootloader rollback by itself.
-  if (pendingVerify && bleAttached && !safeModeActive && loopCounter > 0 &&
+  // A cloud-deployed image is confirmed by the cloud agent after the backend
+  // acknowledged the new build; while it holds, the uptime rule stays out.
+  const bool held = config.holdAutoConfirm && config.holdAutoConfirm();
+  if (pendingVerify && bleAttached && !safeModeActive && !held && loopCounter > 0 &&
       now >= config.autoConfirmMs) {
     Serial.println("[core] app running and uptime healthy; confirming OTA image automatically");
     confirmBoot();

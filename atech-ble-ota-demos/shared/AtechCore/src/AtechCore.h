@@ -17,6 +17,9 @@ struct AtechCoreConfig {
   int ledPin;                   // onboard NeoPixel pin (48)
   uint32_t autoConfirmMs;       // uptime after which a pending image is confirmed
   bool (*otaBusy)();            // true while any OTA transport owns flash
+  // Optional: true while another verifier (the cloud OTA agent waiting for the backend's
+  // acknowledgment) must decide about the pending image instead of the uptime rule.
+  bool (*holdAutoConfirm)();
 };
 
 namespace atech {
@@ -24,6 +27,8 @@ namespace atech {
 // Identity
 const char *deviceId();          // "ATECH-" + 12 uppercase hex MAC digits
 const char *pairingSuffix();     // last three MAC bytes, 6 uppercase hex digits
+const char *buildId();           // the running image's build id ("stock" or a backend job id)
+const char *coreVersion();       // ATECH_CORE_VERSION
 String bleName(const char *prefix);
 
 // Lifecycle (called from each demo's main.cpp)

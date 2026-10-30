@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const util = require('node:util');
+const {slotSizeFromCsv} = require('./partitions');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 
@@ -26,6 +27,37 @@ function findPio(env) {
 function pioJobs(env) {
   const jobs = Number(env.ATECH_PIO_JOBS);
   return Number.isInteger(jobs) && jobs > 0 ? jobs : null;
+}
+
+// The OTA slot size comes from the checked-in partition table (both demos share it).
+function slotSize(demoDir) {
+  try { return slotSizeFromCsv(path.join(demoDir, 'partitions.csv')); } catch { return 0x600000; }
+}
+
+// The backend's own public origin (https://host[:port]), baked into generated firmware as the
+// cloud server the board reports to. Anything with a path, query or other scheme is ignored.
+function publicUrl(env) {
+  const raw = String(env.ATECH_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  return /^https?:\/\/[A-Za-z0-9.-]+(:[0-9]+)?$/.test(raw) ? raw : null;
+}
+
+function positive(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+// Cloud OTA timings; see CLOUD_WIFI_OTA.md. Seconds and minutes in the environment, ms here.
+function cloudSettings(env) {
+  return {
+    pollMs: positive(env.ATECH_CLOUD_POLL_MS, 15000),
+    jobTtlMs: positive(env.ATECH_CLOUD_JOB_TTL_MIN, 30) * 60 * 1000,
+    stallMs: positive(env.ATECH_CLOUD_STALL_S, 120) * 1000,
+    rebootTimeoutMs: positive(env.ATECH_CLOUD_REBOOT_TIMEOUT_S, 300) * 1000,
+    confirmTimeoutMs: positive(env.ATECH_CLOUD_CONFIRM_TIMEOUT_S, 120) * 1000,
+    offlineAfterMs: positive(env.ATECH_CLOUD_OFFLINE_S, 45) * 1000,
+    maxAttempts: Number.isInteger(Number(env.ATECH_CLOUD_MAX_ATTEMPTS)) && Number(env.ATECH_CLOUD_MAX_ATTEMPTS) > 0 ? Number(env.ATECH_CLOUD_MAX_ATTEMPTS) : 5,
+    chunkBytes: positive(env.ATECH_CLOUD_CHUNK_BYTES, 131072),
+  };
 }
 
 function demoEntry(demo, key, name, imageIdentity, blePrefix, ssidPrefix, otaProtocol) {
@@ -67,8 +99,8 @@ function loadConfig(env = process.env) {
       2: demoEntry(2, 'demo2-bleota-library', 'Demo 2 gb88 BLEOTA', 'ATECH-OTA-APP-DEMO2',
                    'Atech-Library-OTA', 'Atech-OTA-D2', 'gb88-bleota'),
     },
-    board: {id: 'esp32-s3-devkitc-1', flashSize: '16MB', memoryType: 'qio_opi', variant: 'N16R8'},
-    slotSize: 0x600000,
+    board: {id: 'esp32-s3-devkitc-1', flashSize: '16MB', memoryType: 'qio_opi', variant: 'N16R8', psram: '8MB'},
+    slotSize: slotSize(path.join(rootDir, 'demo1-custom-gatt')),
     sizeMargin: 64 * 1024,
     pio: findPio(env),
     pioJobs: pioJobs(env),
@@ -88,6 +120,9 @@ function loadConfig(env = process.env) {
     dashboardKey: env.ATECH_BUILDER_KEY || null,
     // "1"/"all"/"1,2": start simulated boards in-process (no hardware involved).
     simulatedDevices: env.ATECH_SIMULATED_DEVICE || null,
+    // Cloud OTA: the public origin boards report to, and the job timings.
+    publicUrl: publicUrl(env),
+    cloud: cloudSettings(env),
   };
 }
 

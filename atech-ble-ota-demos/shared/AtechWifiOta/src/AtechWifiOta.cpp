@@ -1,5 +1,6 @@
 #include "AtechWifiOta.h"
 
+#include <AtechCloudOta.h>
 #include <AtechWifiLan.h>
 #include <DNSServer.h>
 #include <Preferences.h>
@@ -80,6 +81,16 @@ const char PORTAL_HTML[] PROGMEM = R"ATECHHTML(
     <p class="small">Once the board is on your Wi-Fi it is found by the Atech dashboard and updates arrive in seconds. This hotspot stays available as the fallback.</p>
   </section>
 
+  <section class="card" id="cloudCard" aria-labelledby="cloud-title" hidden>
+    <h2 id="cloud-title">Cloud deployments</h2>
+    <div id="cloudStatus" class="status" role="status" aria-live="polite">Checking…</div>
+    <label for="cloudUrl">Build service URL (https)</label>
+    <input id="cloudUrl" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://atech-api.example.com" style="width:100%;border:1px solid var(--line);border-radius:11px;padding:12px;background:#07111f;color:var(--ink)">
+    <button id="cloudSave">Save server URL</button>
+    <button id="cloudClear" class="secondary">Use the built-in default</button>
+    <p class="small">The board polls this server over HTTPS for firmware you deploy from the hosted dashboard. Claim the board there with its ID and the OTA authorization code. Your Wi-Fi password never leaves the board.</p>
+  </section>
+
   <section class="card" aria-labelledby="deploy-title">
     <h2 id="deploy-title">Deploy application firmware (fallback)</h2>
     <label for="firmware">Application firmware.bin</label>
@@ -117,7 +128,13 @@ const char PORTAL_HTML[] PROGMEM = R"ATECHHTML(
   wifiScan.addEventListener('click',async()=>{const token=needToken();if(!token)return;wifiScan.disabled=true;setWifi('Scanning for 2.4 GHz networks…');try{const r=await fetch('/api/wifi/scan',{headers:{'X-Atech-OTA-Key':token},cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Scan failed');wifiList.replaceChildren();for(const n of d.networks||[]){const o=document.createElement('option');o.value=n.ssid;o.label=`${n.ssid} (${n.rssi} dBm${n.open?', open':''})`;wifiList.append(o)}setWifi(`${(d.networks||[]).length} network(s) found; pick one from the list.`)}catch(e){setWifi('Scan failed: '+e.message,'bad')}finally{wifiScan.disabled=false}});
   wifiSave.addEventListener('click',async()=>{const token=needToken();if(!token)return;const ssid=wifiSsid.value.trim();if(!ssid){setWifi('Enter the network name.','bad');return}wifiSaving=true;wifiSave.disabled=true;setWifi('Saving and joining '+ssid+'…');try{const body=new URLSearchParams({ssid,pass:wifiPass.value});const r=await fetch('/api/wifi/save',{method:'POST',headers:{'X-Atech-OTA-Key':token,'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();if(!r.ok)throw new Error(d.error||'Save failed');wifiPass.value='';let tries=0;const poll=async()=>{tries++;const w=await wifiRefresh();if(w&&w.connected){wifiSaving=false;wifiSave.disabled=false;return}if(tries<15)setTimeout(poll,2000);else{wifiSaving=false;wifiSave.disabled=false;setWifi('The board has not joined '+ssid+' yet. It keeps retrying; check the password or try again.','bad')}};setTimeout(poll,2500)}catch(e){wifiSaving=false;wifiSave.disabled=false;setWifi('Could not save: '+e.message,'bad')}});
   wifiForget.addEventListener('click',async()=>{const token=needToken();if(!token)return;try{const r=await fetch('/api/wifi/forget',{method:'POST',headers:{'X-Atech-OTA-Key':token}});const d=await r.json();if(!r.ok)throw new Error(d.error||'Request rejected');await wifiRefresh()}catch(e){setWifi('Could not forget: '+e.message,'bad')}});
-  refresh().catch(()=>{});wifiRefresh();setInterval(()=>{if(!portalBusy)refresh().catch(()=>{});if(!wifiSaving)wifiRefresh()},5000);
+  const cloudCard=$('cloudCard'),cloudStatus=$('cloudStatus'),cloudUrl=$('cloudUrl'),cloudSave=$('cloudSave'),cloudClear=$('cloudClear');
+  const setCloud=(text,kind='')=>{cloudStatus.textContent=text;cloudStatus.className='status '+kind};
+  const stateText={disabled:'No server URL configured.',waiting_wifi:'Waiting for the home Wi-Fi connection.',unclaimed:'Online, waiting to be claimed in the dashboard (enter the board ID and the OTA authorization code there).',idle:'Registered; polling for deployments.',downloading:'Downloading a deployment.',installing:'Installing a deployment.',rebooting:'Rebooting into a new deployment.',confirming:'Confirming the new firmware.',error:'Error'};
+  async function cloudRefresh(){try{const r=await fetch('/api/cloud/status',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const c=await r.json();cloudCard.hidden=false;cloudClear.hidden=!c.stored_url;if(!cloudUrl.value&&c.url)cloudUrl.placeholder=c.url;let text=(stateText[c.state]||c.state)+(c.url?' Server: '+c.url+(c.stored_url?' (set here)':' (built in)')+'.':'');if(c.last_error&&c.state==='error')text+=' '+c.last_error+'.';if(c.last_contact_ms>0&&c.state!=='disabled')text+=' Last contact '+Math.round(c.last_contact_ms/1000)+' s ago.';setCloud(text,c.state==='error'?'bad':(c.state==='idle'||c.state==='downloading'||c.state==='installing')?'ok':'');return c}catch(e){cloudCard.hidden=true;return null}}
+  cloudSave.addEventListener('click',async()=>{const token=needToken();if(!token)return;const url=cloudUrl.value.trim();if(!url){setCloud('Enter the server URL, for example https://atech-api.example.com.','bad');return}cloudSave.disabled=true;try{const body=new URLSearchParams({url});const r=await fetch('/api/cloud/save',{method:'POST',headers:{'X-Atech-OTA-Key':token,'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();if(!r.ok)throw new Error(d.error||'Save failed');cloudUrl.value='';setCloud('Server URL saved; the board connects to it over its home Wi-Fi.','ok');setTimeout(cloudRefresh,3000)}catch(e){setCloud('Could not save: '+e.message,'bad')}finally{cloudSave.disabled=false}});
+  cloudClear.addEventListener('click',async()=>{const token=needToken();if(!token)return;try{const r=await fetch('/api/cloud/clear',{method:'POST',headers:{'X-Atech-OTA-Key':token}});const d=await r.json();if(!r.ok)throw new Error(d.error||'Request rejected');await cloudRefresh()}catch(e){setCloud('Could not clear: '+e.message,'bad')}});
+  refresh().catch(()=>{});wifiRefresh();cloudRefresh();setInterval(()=>{if(!portalBusy)refresh().catch(()=>{});if(!wifiSaving)wifiRefresh();cloudRefresh()},5000);
 })();
 </script></body></html>
 )ATECHHTML";
@@ -365,6 +382,31 @@ struct AtechWifiOtaPortal::Impl {
       if (uploading || lan->isTransferring()) { sendJson(409, F("{\"ok\":false,\"error\":\"Update is active\"}")); return; }
       lastActivityMs = millis();
       if (!lan->forgetCredentials()) { sendJson(500, F("{\"ok\":false,\"error\":\"Could not erase the credentials\"}")); return; }
+      sendJson(200, F("{\"ok\":true}"));
+    });
+  }
+
+  // Cloud OTA agent: status for anyone on the hotspot, URL changes behind the code.
+  void configureCloudRoutes() {
+    AtechCloudOta *cloud = config.cloud;
+    if (!cloud) return;
+    server->on("/api/cloud/status", HTTP_GET, [this, cloud]() {
+      sendJson(200, cloud->statusJson());
+    });
+    server->on("/api/cloud/save", HTTP_POST, [this, cloud]() {
+      if (!authorize()) { sendJson(401, F("{\"ok\":false,\"error\":\"Invalid OTA authorization code\"}")); return; }
+      if (uploading || cloud->isTransferring()) { sendJson(409, F("{\"ok\":false,\"error\":\"Update is active\"}")); return; }
+      lastActivityMs = millis();
+      if (!cloud->setServerUrl(server->arg("url"))) {
+        sendJson(400, String(F("{\"ok\":false,\"error\":\"")) + jsonEscape(cloud->lastError()) + F("\"}"));
+        return;
+      }
+      sendJson(200, F("{\"ok\":true}"));
+    });
+    server->on("/api/cloud/clear", HTTP_POST, [this, cloud]() {
+      if (!authorize()) { sendJson(401, F("{\"ok\":false,\"error\":\"Invalid OTA authorization code\"}")); return; }
+      lastActivityMs = millis();
+      if (!cloud->clearServerUrl()) { sendJson(500, F("{\"ok\":false,\"error\":\"Could not clear the server URL\"}")); return; }
       sendJson(200, F("{\"ok\":true}"));
     });
   }
@@ -845,6 +887,7 @@ struct AtechWifiOtaPortal::Impl {
 
     configureRoutes();
     configureWifiRoutes();
+    configureCloudRoutes();
     if (!dns->start(DNS_PORT, "*", AP_IP)) {
       Serial.println(F("Warning: captive DNS did not start; use http://192.168.4.1 directly"));
     }

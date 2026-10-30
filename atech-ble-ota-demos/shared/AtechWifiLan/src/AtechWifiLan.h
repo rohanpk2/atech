@@ -21,6 +21,8 @@ struct AtechWifiLanConfig {
   String (*authToken)();
   // True while another transport (BLE OTA, hotspot upload) owns flash.
   bool (*otherOtaBusy)();
+  // Optional: a JSON object appended to /api/identity as "cloud" (the cloud OTA agent's status).
+  String (*extraIdentity)();
 };
 
 class AtechWifiLan {

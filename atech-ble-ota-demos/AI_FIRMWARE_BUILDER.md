@@ -51,7 +51,7 @@ Permitted GPIO: 1, 2, 4 to 18, 21, 38 to 42, 47. Reserved: 0 (BOOT), 3, 19/20 (U
 
 - Source policy: entry points present, no `setup`/`loop`, allowed includes only, forbidden API list, GPIO literals, no `#undef`/`#define` of the guarded names, size limit 64 KiB. Comments and string literals are ignored.
 - Board configuration: the workspace is a copy of the demo's `platformio.ini` (board `esp32-s3-devkitc-1`, 16 MB, `qio_opi`) and its unchanged `partitions.csv`; the AI environment only adds `-DDEMO_VERSION=3 -DATECH_AI_BUILD=1`.
-- Image: magic `0xE9`, chip id 9 (ESP32-S3), 16 MB flash header, application descriptor present, size at most 6 MiB minus a 64 KiB margin, and both markers found: the demo's Wi-Fi portal identity (`ATECH-OTA-APP-DEMO1`/`DEMO2`) and `ATECH-BUILD:<build id>`.
+- Image: magic `0xE9`, chip id 9 (ESP32-S3), 16 MB flash header, application descriptor present, size at most 6 MiB minus a 64 KiB margin (the slot size comes from `partitions.csv`, and PlatformIO's post-build `shared/tools/check_ota_size.py` fails the compile itself when an image would not fit), and three markers found: the demo's Wi-Fi portal identity (`ATECH-OTA-APP-DEMO1`/`DEMO2`), `ATECH-BUILD:<build id>` and `ATECH-CLOUD-AGENT:` (the cloud OTA agent is linked in).
 - Browser, again, before any byte is written: ESP32-S3 application header, demo match, device binding, slot size reported by the board.
 
 ## Identity service (both demos)
@@ -92,9 +92,10 @@ Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need ei
 | `GET /api/builds/:id/events` | SSE stream of job updates, ends with `event: done` |
 | `GET /api/builds/:id/firmware.bin` | the validated image (only when `ready`) |
 | `POST /api/builds/:id/deployed` | record a deployment result for the audit trail |
-| `POST /api/builds/:id/deploy` `{deviceId}` | start a Wi-Fi deployment to a paired board (202 with `id`) |
-| `GET /api/deployments`, `/:id`, `/:id/events`; `POST /:id/abort` | deployment state, SSE stream, abort |
-| `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/:id/probe`, `/:id/control`; `DELETE /:id` | device registry (see WIFI_LAN_OTA.md) |
+| `POST /api/builds/:id/deploy` `{deviceId, via?}` | start a deployment: over the LAN to a paired board, or `via: "cloud"` as a job the board pulls (202 with `id`, `transport`) |
+| `GET /api/deployments`, `/:id`, `/:id/events`; `POST /:id/abort` | deployment state, SSE stream, abort (LAN) or cancel while pending (cloud) |
+| `GET /api/devices?refresh=1`; `POST /api/devices/discover`, `/pair`, `/claim`, `/:id/probe`, `/:id/control`; `DELETE /:id` | device registry: LAN pairing (WIFI_LAN_OTA.md), cloud claiming by id and pairing token, `unclaimed` boards waiting; owner-scoped |
+| `GET /api/device/challenge`, `POST /api/device/login`, `/poll`, `GET /api/device/jobs/:id/firmware`, `POST /api/device/jobs/:id/status` | the board-facing API (no dashboard key; see CLOUD_WIFI_OTA.md) |
 | `GET /api/installer/:demo/manifest.json`, `/parts/:name`, `/status`; `POST /api/installer/:demo/build` | ESP Web Tools |
 
 Jobs persist under `.ai-builds/jobs/<id>/` (prompt, every attempt's `user_app.cpp` and `build.log`, `firmware.bin`, `meta.json`). Workspaces live in `.ai-builds/workspaces/demo<N>/`; the checked-in demo projects are never modified by a job. The backend binds to 127.0.0.1 by default and then needs no authentication; on any other address (a phone on the LAN, the Docker deployment) every `/api/*` request must carry the dashboard key, see [deploy/README.md](deploy/README.md).

@@ -61,6 +61,7 @@ function fakeWorkspace(compileResults) {
       const meta = prepared[prepared.length - 1].meta;
       const markers = [config.demos[demo].imageIdentity];
       if (spec.withBuildMarker !== false) markers.push(`ATECH-BUILD:${meta.buildId}`);
+      if (spec.withAgentMarker !== false) markers.push('ATECH-CLOUD-AGENT:1');
       fs.writeFileSync(firmwarePath, syntheticFirmware(markers));
       return {ok: true, code: 0, timedOut: false, log: 'build log\n[SUCCESS]', firmwarePath, diagnostics: []};
     },

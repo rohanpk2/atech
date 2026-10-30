@@ -23,6 +23,13 @@
         },
         {
           "type": "request.headers",
+          "op": "set",
+          "target": {"key": "x-atech-user"},
+          "args": "$ATECH_DASHBOARD_USER",
+          "env": ["ATECH_DASHBOARD_USER"]
+        },
+        {
+          "type": "request.headers",
           "op": "delete",
           "target": {"key": "authorization"}
         }

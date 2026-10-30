@@ -8,10 +8,16 @@ Browser  --HTTPS-->  Vercel project (this directory is the Root Directory)
                        1. middleware.js: HTTP Basic sign-in on every path (fails closed)
                        2. static files from dist/: /demo1/, /demo2/, /shared/
                        3. vercel.json route: /api/(.*) -> ${ATECH_BACKEND_URL}/api/$1
-                          with request header x-atech-key = $ATECH_BUILDER_KEY added by Vercel
+                          with request headers x-atech-key = $ATECH_BUILDER_KEY and
+                          x-atech-user = $ATECH_DASHBOARD_USER added by Vercel
                                                   |  HTTPS
                        Droplet: Caddy (TLS) -> builder container :5173 (requires the key on /api/*)
+                                                  ^  HTTPS, outbound from the board, /api/device/*
+ESP32-S3 on its home Wi-Fi ───────────────────────┘  (own pairing token, no dashboard key)
 ```
+
+The signed-in user name is forwarded as `x-atech-user`; the backend uses it as the owner of claimed
+boards and their deployments, so two dashboards with different sign-ins never see each other's boards.
 
 The browser only ever talks to the Vercel origin. The backend key is a Vercel environment
 variable expanded at request time; it is not in this repository, not in the build output (the
@@ -26,7 +32,7 @@ job id back at once, and then polls `GET /api/builds/<id>` every three seconds u
 
 | File | Role |
 | --- | --- |
-| `vercel.json` | build settings, the redirects (`/` to `/demo1/`, `/demo1` and `/demo2` to their slashed form), the `/api` route that sets the key and removes the sign-in header |
+| `vercel.json` | build settings, the redirects (`/` to `/demo1/`, `/demo1` and `/demo2` to their slashed form), the `/api` route that sets the key and the user header and removes the sign-in header |
 | `middleware.js` | Vercel Routing Middleware: Basic sign-in from `ATECH_DASHBOARD_USER` / `ATECH_DASHBOARD_PASSWORD` |
 | `build.js` | `npm run build`: copies `../demo1-custom-gatt/web`, `../demo2-bleota-library/web` and `../web-shared` into `dist/`, writes the hosted `shared/atech-config.js`, checks the environment and scans the output for secrets |
 | `dev-server.js` | `npm run dev`: local emulation of the Vercel behaviour against any backend |
@@ -71,6 +77,8 @@ With the sign-in variables missing at run time, every page answers 503 rather th
 
 1. Put the Droplet behind HTTPS: `deploy/README.md`, section "HTTPS for the hosted dashboards"
    (DNS record, firewall ports 80 and 443, `/etc/atech/caddy.env`, the two-file `docker compose up`).
+   Set `ATECH_PUBLIC_URL=https://<that name>` in `/etc/atech/builder.env` so generated firmware knows
+   which server to poll.
    Check from your laptop: `curl -si https://atech-api.example.com/api/health` answers `401` (the
    key is required), and the same request with `-H "x-atech-key: <key>"` answers `200` with
    `{"ok":true,...}`.
@@ -123,17 +131,21 @@ under the status, and Download firmware fetches the validated image through the 
 
 ## What works where
 
-| Browser | Generate, status, source preview, download | Bluetooth deployment | Wi-Fi deployment to a board on your network |
+| Browser | Generate, status, download | Cloud Wi-Fi deploy (board on its own Wi-Fi) | Bluetooth deployment |
 | --- | --- | --- | --- |
-| Chrome, Edge (desktop, Android) | yes | yes (HTTPS origin) | not yet |
-| Safari (macOS, iPhone, iPad) | yes | no Web Bluetooth | not yet |
-| Firefox | yes | no Web Bluetooth | not yet |
+| Chrome, Edge (desktop, Android) | yes | yes | yes (HTTPS origin) |
+| Safari (macOS, iPhone, iPad) | yes | yes | no Web Bluetooth |
+| Firefox | yes | yes | no Web Bluetooth |
 
-Wi-Fi deployment goes through the backend, and the backend now runs in the cloud, not on your
-Wi-Fi, so it cannot reach a board at home. The hosted dashboard says so, hides Find devices, and
-offers Bluetooth and the hotspot download instead. Simulated boards (`ATECH_SIMULATED_DEVICE` on
-the server) still appear and accept deployments, which exercises the cloud path end to end
-without hardware. A future board-to-cloud connection would slot into the same panel.
+Cloud Wi-Fi deploy queues a job on the backend; the board polls the backend over HTTPS, downloads
+the image, installs it, reboots and reports back. The dashboard shows pending, offline, downloading,
+installing, rebooting, succeeded or failed. Step 1 lists the boards claimed by the signed-in user
+with their last contact, and boards that have contacted the backend but are not claimed yet; mDNS
+discovery is not offered on the hosted dashboard. Claiming needs the board id and its pairing token
+(the OTA authorization code printed on the board's serial console). Full description, protocol and
+the physical checklist: [../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md). Simulated boards
+(`ATECH_SIMULATED_DEVICE` on the server) register through the cloud API too, so the hosted flow can be
+exercised end to end without hardware. **Nothing about the cloud path has run on a physical board.**
 
 The USB installer page works on Vercel (Web Serial needs HTTPS, which Vercel provides). Its
 "Build the base image now" button is hidden on the hosted site because that is a multi-minute

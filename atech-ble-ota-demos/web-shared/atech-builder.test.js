@@ -17,7 +17,11 @@ const KNOWN_IDS = new Set(['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSumm
   'deployStatus', 'deployBadge', 'deployProgress', 'deployProgressBar', 'deployTransport', 'deployPercent',
   'deployBytes', 'deploySpeed', 'deployEta', 'deployTime', 'deployPhases', 'deployChecks', 'deployAbort',
   // step flow: scan bar, board facts disclosure, deployment numbers, step markers
-  'devProgress', 'devFacts', 'deployMeta', 'stepConnect', 'stepDescribe', 'stepDeploy']);
+  'devProgress', 'devFacts', 'deployMeta', 'stepConnect', 'stepDescribe', 'stepDeploy',
+  // cloud: claim a registered board by id and pairing token
+  'devClaimOpen', 'devClaimForm', 'devClaimId', 'devClaimToken', 'devClaimName', 'devClaim',
+  // the first method card is relabelled Cloud Wi-Fi for a cloud-registered board
+  'methodWifi']);
 const referenced = [...source.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]);
 assert.ok(referenced.length > 10, 'module must address the builder card by element id');
 assert.deepEqual(referenced.filter(id => !KNOWN_IDS.has(id)), [], 'every referenced id must be documented');
@@ -54,7 +58,10 @@ assert.match(source, /root\.ATECH_CONFIG/, 'module must read window.ATECH_CONFIG
 assert.match(source, /function apiUrl\(/, 'every backend URL must go through apiUrl');
 assert.match(source, /transport === 'poll'/, 'a poll-only transport must be supported');
 assert.match(source, /usePolling \|\| typeof win\.EventSource !== 'function'/, 'poll mode must never open an EventSource');
-assert.match(source, /hosted dashboard yet/, 'hosted copy must say cloud Wi-Fi deployment is not available yet');
+assert.match(source, /Claim one in step 1/, 'hosted copy must point at claiming a board');
+assert.match(source, /\/api\/devices\/claim/, 'claiming goes through the backend');
+assert.match(source, /via: 'cloud'/, 'cloud deployments are requested explicitly');
+assert.match(source, /Cloud Wi-Fi/, 'the cloud path is named');
 assert.doesNotMatch(source, /fetch\((?!apiUrl)/, 'fetch must only be called through apiUrl');
 
 console.log('Atech builder UI structure tests passed');

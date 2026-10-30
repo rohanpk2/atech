@@ -60,6 +60,9 @@
 .device-row.selected { border-color: var(--text); background: var(--bg); }
 .device-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; margin-top: 14px; }
 .device-form input { min-width: 0; }
+.device-form.claim { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.7fr) auto; }
+.device-row .ago { color: var(--muted); font-size: 12px; }
+.device-row.unclaimed { border-style: dashed; }
 
 /* ---- Step 2: builder ---- */
 .ai-backend { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
@@ -146,7 +149,7 @@
 
 @media (max-width: 900px) {
   .methods { grid-template-columns: 1fr; }
-  .device-form { grid-template-columns: 1fr; }
+  .device-form, .device-form.claim { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {

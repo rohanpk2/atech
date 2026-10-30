@@ -19,7 +19,7 @@ function syntheticFirmware({demo = 1, build = 'stock', target = '', size = 64 * 
   buf.writeUInt16LE(chipId, 12);
   if (appDesc) buf.writeUInt32LE(0xABCD5432, 32);
   let offset = 1024;
-  for (const marker of [`ATECH-OTA-APP-DEMO${demo}\0`, `ATECH-BUILD:${build}\0`, `ATECH-TARGET:${target}\0`]) {
+  for (const marker of [`ATECH-OTA-APP-DEMO${demo}\0`, `ATECH-BUILD:${build}\0`, `ATECH-TARGET:${target}\0`, 'ATECH-CLOUD-AGENT:1\0']) {
     buf.write(marker, offset, 'latin1');
     offset += marker.length + 3;
   }

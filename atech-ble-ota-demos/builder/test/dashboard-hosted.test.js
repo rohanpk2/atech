@@ -103,12 +103,12 @@ test('hosted dashboard polls a build to ready without EventSource and offers a s
 });
 
 for (const demo of [1, 2]) {
-  test(`Demo ${demo} hosted dashboard hides Find devices and explains that cloud Wi-Fi deployment is not available`, async () => {
+  test(`Demo ${demo} hosted dashboard hides Find devices and asks for a claimed board instead`, async () => {
     const {doc, errors} = await bootDashboard(demo);
     assert.deepEqual(errors, [], errors.join(' | '));
     assert.equal(doc.getElementById('devFind').hidden, true);
-    assert.match(doc.getElementById('methodWifiNote').textContent, /hosted dashboard yet/);
-    assert.match(doc.getElementById('devStatus').textContent, /not available yet/);
+    assert.match(doc.getElementById('methodWifiNote').textContent, /Claim one in step 1/);
+    assert.match(doc.getElementById('devStatus').textContent, /No board registered yet/);
     assert.equal(doc.body.dataset.deployMethod, 'hotspot');
     assert.equal(doc.getElementById('aiBuild').disabled, false, 'generation does not need a board or Bluetooth');
   });

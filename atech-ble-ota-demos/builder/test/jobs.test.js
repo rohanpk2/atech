@@ -161,3 +161,11 @@ test('the log hook defaults to silence so library users and tests stay quiet', a
   const job = store.create({demo: 1, prompt: 'Quiet'});
   assert.equal((await store.run(job.id)).state, 'ready');
 });
+
+test('an image without the cloud agent marker fails validation', async () => {
+  const {store} = makeStore({responses: [ok()], compileResults: [{ok: true, withAgentMarker: false}]});
+  const done = await store.run(store.create({demo: 1, prompt: 'Blink'}).id);
+  assert.equal(done.state, 'failed');
+  assert.match(done.error, /ATECH-CLOUD-AGENT/);
+  assert.equal(done.firmware, null);
+});

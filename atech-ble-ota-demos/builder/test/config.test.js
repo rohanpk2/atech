@@ -65,3 +65,26 @@ test('loadConfig parses ATECH_PIO_JOBS and ignores nonsense', () => {
   assert.equal(loadConfig({ATECH_PIO_JOBS: 'lots'}).pioJobs, null);
   assert.equal(loadConfig({ATECH_PIO_JOBS: '1.5'}).pioJobs, null);
 });
+
+test('loadConfig derives the OTA slot size from the partition table', () => {
+  assert.equal(loadConfig({}).slotSize, 6291456);
+});
+
+test('loadConfig accepts an https or http origin as the public URL and nothing else', () => {
+  assert.equal(loadConfig({}).publicUrl, null);
+  assert.equal(loadConfig({ATECH_PUBLIC_URL: 'https://api.example.com/'}).publicUrl, 'https://api.example.com');
+  assert.equal(loadConfig({ATECH_PUBLIC_URL: 'http://127.0.0.1:5199'}).publicUrl, 'http://127.0.0.1:5199');
+  assert.equal(loadConfig({ATECH_PUBLIC_URL: 'ftp://x'}).publicUrl, null);
+  assert.equal(loadConfig({ATECH_PUBLIC_URL: 'https://api.example.com/api'}).publicUrl, null);
+});
+
+test('loadConfig exposes the cloud timings with documented defaults and env overrides', () => {
+  const cloud = loadConfig({}).cloud;
+  assert.deepEqual(cloud, {pollMs: 15000, jobTtlMs: 30 * 60 * 1000, stallMs: 120000, rebootTimeoutMs: 300000,
+                           confirmTimeoutMs: 120000, offlineAfterMs: 45000, maxAttempts: 5, chunkBytes: 131072});
+  assert.equal(loadConfig({ATECH_CLOUD_JOB_TTL_MIN: '5'}).cloud.jobTtlMs, 300000);
+  assert.equal(loadConfig({ATECH_CLOUD_POLL_MS: '5000'}).cloud.pollMs, 5000);
+  assert.equal(loadConfig({ATECH_CLOUD_STALL_S: '30'}).cloud.stallMs, 30000);
+  assert.equal(loadConfig({ATECH_CLOUD_OFFLINE_S: '10'}).cloud.offlineAfterMs, 10000);
+  assert.equal(loadConfig({ATECH_CLOUD_MAX_ATTEMPTS: 'lots'}).cloud.maxAttempts, 5);
+});

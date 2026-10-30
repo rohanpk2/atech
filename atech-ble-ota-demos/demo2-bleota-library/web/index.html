@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff">
   <title>Atech Device Console (Demo 2)</title>
   <link rel="stylesheet" href="styles.css?v=4">
-  <link rel="stylesheet" href="/shared/builder.css?v=4">
+  <link rel="stylesheet" href="/shared/builder.css?v=5">
 </head>
 <body>
   <header class="topbar">
@@ -48,6 +48,7 @@
             <button id="devFind" class="btn primary" type="button">Find devices</button>
             <button id="connect" class="btn secondary" type="button">Connect Bluetooth</button>
             <button id="disconnect" class="btn secondary" type="button" disabled>Disconnect</button>
+            <button id="devClaimOpen" class="btn text" type="button">Claim a board</button>
             <button id="devForget" class="btn text" type="button" hidden>Forget</button>
           </div>
           <div id="devList" class="device-list" hidden></div>
@@ -55,6 +56,12 @@
             <input id="devPairHost" type="text" autocomplete="off" spellcheck="false" placeholder="Board IP address or atech-xxxxxx.local">
             <input id="devPairToken" type="password" autocomplete="off" placeholder="OTA authorization code">
             <button id="devPair" class="btn primary" type="button">Pair</button>
+          </div>
+          <div id="devClaimForm" class="device-form claim" hidden>
+            <input id="devClaimId" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Board ID (ATECH-...)">
+            <input id="devClaimToken" type="password" autocomplete="off" placeholder="Pairing token (OTA authorization code)">
+            <input id="devClaimName" type="text" autocomplete="off" placeholder="Name (optional)">
+            <button id="devClaim" class="btn primary" type="button">Claim</button>
           </div>
           <p id="devHint" class="hint"></p>
           <p id="aiBrowserNote" class="hint" hidden></p>
@@ -239,7 +246,7 @@
 
   <script src="/shared/atech-config.js?v=1"></script>
   <script src="/shared/atech-identity.js?v=4"></script>
-  <script src="/shared/atech-builder.js?v=4"></script>
+  <script src="/shared/atech-builder.js?v=5"></script>
   <script src="bleota-client.js?v=4"></script>
   <script src="app.js?v=4"></script>
 </body>

@@ -54,17 +54,38 @@ function baseBuildIsStale(demo, {config = loadConfig()} = {}) {
   const entry = config.demos[demo];
   const firmware = path.join(entry.dir, '.pio', 'build', 'base', 'firmware.bin');
   if (!fs.existsSync(firmware)) return true;
+  // An image built for another server URL (or before one was configured) must be rebuilt.
+  if ((readStamp(entry) || '') !== (config.publicUrl || '')) return true;
   const built = fs.statSync(firmware).mtimeMs;
   return newestMtime(path.join(entry.dir, 'src')) > built || newestMtime(config.sharedDir) > built;
+}
+
+// The USB baseline carries the backend's public URL too, so a freshly installed board knows
+// where to report without typing anything on the hotspot page. PLATFORMIO_BUILD_FLAGS is split
+// like a shell line (shlex), so the inner double quotes only survive inside single quotes.
+function buildFlagsEnv(config) {
+  if (!config.publicUrl) return {};
+  return {PLATFORMIO_BUILD_FLAGS: `'-DATECH_CLOUD_URL="${String(config.publicUrl).replace(/["'\\\s]/g, '')}"'`};
+}
+
+// Records which server URL a base image was built with, next to firmware.bin.
+const BASE_STAMP = 'atech-cloud-url.stamp';
+
+function stampPath(entry) { return path.join(entry.dir, '.pio', 'build', 'base', BASE_STAMP); }
+
+function readStamp(entry) {
+  try { return fs.readFileSync(stampPath(entry), 'utf8'); } catch { return null; }
 }
 
 async function ensureBaseBuild(demo, {config = loadConfig(), force = false, onLine} = {}) {
   const entry = config.demos[demo];
   if (!entry) throw new Error(`Unknown demo ${demo}`);
   if (!force && !baseBuildIsStale(demo, {config})) return {dir: entry.dir, built: false};
-  const result = await runPio(['run', '-e', 'base'], {cwd: entry.dir, onLine, pioBin: config.pio, jobs: config.pioJobs ?? null});
+  const result = await runPio(['run', '-e', 'base'], {cwd: entry.dir, onLine, pioBin: config.pio, jobs: config.pioJobs ?? null,
+                                                      env: buildFlagsEnv(config)});
   if (result.code !== 0) throw new Error(`Base build for demo ${demo} failed (exit ${result.code})`);
+  try { fs.writeFileSync(stampPath(entry), config.publicUrl || ''); } catch { /* the next check rebuilds */ }
   return {dir: entry.dir, built: true, log: result.log};
 }
 
-module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, PART_OFFSETS, PART_ORDER};
+module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, buildFlagsEnv, PART_OFFSETS, PART_ORDER, BASE_STAMP};

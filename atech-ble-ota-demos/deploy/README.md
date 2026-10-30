@@ -49,7 +49,9 @@ Read from `/etc/atech/builder.env`:
 | `ATECH_MAX_REPAIRS` | no | compile-repair rounds, default 3 |
 | `ATECH_PIO_JOBS` | no | parallel SCons jobs for `pio run`; the image sets 1 for a 2 GB server |
 | `ATECH_LAN_PORT`, `ATECH_LAN_CHUNK_BYTES` | no | Wi-Fi LAN deployment settings (see limitations) |
-| `ATECH_SIMULATED_DEVICE` | no | `1`, `2` or `all`: simulated boards, no hardware involved |
+| `ATECH_SIMULATED_DEVICE` | no | `1`, `2` or `all`: simulated boards, no hardware involved; they also register through the cloud API |
+| `ATECH_PUBLIC_URL` | for cloud deployments | this server's public `https://` origin (the name in `caddy.env`). Baked into every generated image and the USB baseline as the server the board polls. See [../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md). |
+| `ATECH_CLOUD_*` | no | cloud job timings (poll, expiry, stall, reboot and confirm windows, offline threshold, attempts, chunk); defaults in `builder.env.example` |
 
 Fixed by `compose.yaml` (an env-file value does not override them): `ATECH_BUILDER_HOST=0.0.0.0`,
 `ATECH_BUILDER_PORT=5173`, `ATECH_BUILDS_DIR=/data/builds`, `NODE_OPTIONS=--max-old-space-size=256`,
@@ -183,12 +185,28 @@ Vercel, behind the sign-in configured there. Keep the key private: it is the onl
 between the internet and a firmware build on this server. Rotate it by changing
 `ATECH_BUILDER_KEY` in the env file, restarting the container, and updating the Vercel variable.
 
+The same name is what the boards talk to. `/api/device/*` is the device API: it does not take the
+dashboard key (boards authenticate with their own pairing token and a bearer session, see
+[../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md)), it is rate limited per address and per board id, and
+it is the only way firmware leaves this server for a board. Set `ATECH_PUBLIC_URL=https://<that name>`
+in `builder.env` so generated images know where to report:
+
+```sh
+curl -si https://atech-api.example.com/api/device/challenge?id=ATECH-000000000000   # 200, ok=1 ... claimed=0
+```
+
+The board validates the certificate against the Mozilla root bundle compiled into the firmware, so the
+name must have a publicly trusted certificate (Let's Encrypt through Caddy qualifies); a self-signed
+certificate is refused.
+
 ## Limitations of a cloud deployment
 
 - Wi-Fi LAN deployment and mDNS discovery need the backend on the same network as the board; a cloud
-  host cannot reach a board on a home LAN, so Wi-Fi deploy reports the board unreachable. The hosted
-  dashboard says so and hides Find devices. Bluetooth deployment from the browser and the firmware
-  download for the hotspot portal work unchanged.
+  host cannot reach a board on a home LAN. Boards on a home network instead poll this server over HTTPS
+  (Cloud Wi-Fi deploy, `/api/device/*`, [../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md)); the hosted
+  dashboard lists claimed boards with their last contact and queues jobs for them. Bluetooth deployment
+  from the browser and the firmware download for the hotspot portal work unchanged. Nothing about the
+  cloud path has run on a physical board yet.
 - The USB installer (`/demo1/install.html`) needs the base image; build it once with
   `$C run --rm builder node deploy/warm-cache.js --install-only --base` or the page's own button.
 - This packaging was built and exercised on a laptop (Docker Desktop, arm64) and in the compose

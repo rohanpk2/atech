@@ -2,7 +2,9 @@
 # (see ../vercel-frontend/README.md). Certificates come from Let's Encrypt automatically for
 # the name in ATECH_PUBLIC_HOST (/etc/atech/caddy.env). Only /api/* is forwarded; the
 # dashboards are served by Vercel, and the backend still requires its dashboard key on every
-# /api request, so a direct hit without the key answers 401.
+# /api request, so a direct hit without the key answers 401. The exception is /api/device/*,
+# the board-facing API: boards authenticate with their own pairing token (see CLOUD_WIFI_OTA.md),
+# and the backend rate limits it. Firmware downloads to boards flow backend -> Caddy -> board.
 {$ATECH_PUBLIC_HOST} {
 	handle /api/* {
 		reverse_proxy builder:5173 {

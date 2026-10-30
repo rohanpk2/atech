@@ -494,6 +494,10 @@ struct AtechWifiLan::Impl {
     if (identity.endsWith("}")) identity.remove(identity.length() - 1);
     identity += F(",\"net\":");
     identity += netJson();
+    if (config.extraIdentity) {
+      const String extra = config.extraIdentity();
+      if (extra.startsWith("{")) { identity += F(",\"cloud\":"); identity += extra; }
+    }
     identity += F("}");
     return identity;
   }

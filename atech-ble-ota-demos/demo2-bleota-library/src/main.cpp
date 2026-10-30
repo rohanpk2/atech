@@ -5,6 +5,7 @@
 // through the protected Atech core (shared/AtechCore). The gb88 protocol is
 // untouched; the core only pauses the app while a transfer owns flash.
 #include <Arduino.h>
+#include <AtechCloudOta.h>
 #include <AtechCore.h>
 #include <AtechWifiLan.h>
 #include <AtechWifiOta.h>
@@ -22,6 +23,15 @@
 #endif
 #ifndef ATECH_WIFI_OTA_TOKEN
 #define ATECH_WIFI_OTA_TOKEN ""
+#endif
+// Cloud OTA: the builder backend's public origin, baked in by the backend for generated images
+// (and by the installer for the base image); the hotspot portal can override it. Plain http://
+// is refused unless ATECH_CLOUD_ALLOW_HTTP=1 (lab builds against a local backend).
+#ifndef ATECH_CLOUD_URL
+#define ATECH_CLOUD_URL ""
+#endif
+#ifndef ATECH_CLOUD_ALLOW_HTTP
+#define ATECH_CLOUD_ALLOW_HTTP 0
 #endif
 
 #define ATECH_STR_(value) #value
@@ -48,6 +58,7 @@ BLEOTAClass BLEOTA;
 BLEServer *server = nullptr;
 AtechWifiOtaPortal wifiOta;
 AtechWifiLan wifiLan;
+AtechCloudOta cloudOta;
 volatile bool connected = false;
 volatile bool abortRequested = false;
 bool wasConnected = false;
@@ -56,21 +67,30 @@ bool lanTransferWasActive = false;
 String bleDeviceName;
 
 bool otherOtaBusy() {
-  return connected || BLEOTA.isRunning() || wifiLan.isTransferring();
+  return connected || BLEOTA.isRunning() || wifiLan.isTransferring() || cloudOta.isTransferring();
 }
 
 bool anyOtaBusy() {
-  return BLEOTA.isRunning() || wifiOta.isUpdating() || wifiLan.isTransferring();
+  return BLEOTA.isRunning() || wifiOta.isUpdating() || wifiLan.isTransferring() || cloudOta.isTransferring();
 }
 
-// The LAN service may not start while gb88 BLEOTA or the hotspot owns flash.
+// The LAN service may not start while gb88 BLEOTA, the hotspot or the cloud agent owns flash.
 bool lanBlockedByOthers() {
-  return BLEOTA.isRunning() || wifiOta.isUpdating();
+  return BLEOTA.isRunning() || wifiOta.isUpdating() || cloudOta.isTransferring();
+}
+
+// The cloud agent may not start a download while any other transport owns flash.
+bool cloudBlockedByOthers() {
+  return BLEOTA.isRunning() || wifiOta.isUpdating() || wifiLan.isTransferring();
 }
 
 String lanAuthToken() {
   return wifiOta.otaToken();
 }
+
+bool cloudHoldsConfirm() { return cloudOta.holdsConfirm(); }
+String cloudIdentity() { return cloudOta.statusJson(); }
+bool homeWifiConnected() { return wifiLan.isConnected(); }
 
 void wifiOtaModeChanged(bool active) {
   if (active) {
@@ -137,6 +157,7 @@ void setup() {
   coreConfig.ledPin = LED_PIN;
   coreConfig.autoConfirmMs = AUTO_CONFIRM_MS;
   coreConfig.otaBusy = anyOtaBusy;
+  coreConfig.holdAutoConfirm = cloudHoldsConfirm;
   if (!atech::coreBegin(coreConfig)) {
     Serial.println("Atech core initialization failed");
   }
@@ -170,12 +191,34 @@ void setup() {
   lanConfig.rebootDelayMs = 1500;
   lanConfig.authToken = lanAuthToken;
   lanConfig.otherOtaBusy = lanBlockedByOthers;
+  lanConfig.extraIdentity = cloudIdentity;
   if (!wifiLan.begin(lanConfig)) {
     Serial.printf("Wi-Fi LAN service initialization failed: %s\n", wifiLan.lastError().c_str());
   }
 
+  // Cloud OTA agent: outbound HTTPS to the builder backend, device-pulled deployments.
+  AtechCloudOtaConfig cloudConfig = {};
+  cloudConfig.demo = 2;
+  cloudConfig.imageIdentity = WIFI_OTA_IMAGE_IDENTITY;
+  cloudConfig.preferencesNamespace = "atech_cloud";
+  cloudConfig.firmwareVersion = FIRMWARE_VERSION;
+  cloudConfig.appName = ATECH_APP_NAME;
+  cloudConfig.appVersion = ATECH_APP_VERSION;
+  cloudConfig.defaultUrl = ATECH_CLOUD_URL;
+  cloudConfig.allowInsecureHttp = ATECH_CLOUD_ALLOW_HTTP != 0;
+  cloudConfig.pollIntervalMs = 15000;
+  cloudConfig.confirmTimeoutMs = 180000;
+  cloudConfig.chunkBytes = 131072;
+  cloudConfig.authToken = lanAuthToken;
+  cloudConfig.otherOtaBusy = cloudBlockedByOthers;
+  cloudConfig.wifiConnected = homeWifiConnected;
+  if (!cloudOta.begin(cloudConfig)) {
+    Serial.printf("Cloud OTA agent initialization failed: %s\n", cloudOta.lastError().c_str());
+  }
+
   AtechWifiOtaConfig wifiOtaConfig = {};
   wifiOtaConfig.lan = &wifiLan;
+  wifiOtaConfig.cloud = &cloudOta;
   wifiOtaConfig.deviceName = bleDeviceName.c_str();
   wifiOtaConfig.firmwareVersion = FIRMWARE_VERSION;
   wifiOtaConfig.ssidPrefix = "Atech-OTA-D2";
@@ -202,9 +245,10 @@ void loop() {
   // Always service the LAN service, the BOOT-button detector and an active portal.
   wifiLan.loop();
   wifiOta.loop();
-  // A LAN transfer pauses advertising (not a connected client) so the radio
-  // favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
-  const bool lanTransfer = wifiLan.isTransferring();
+  cloudOta.loop();
+  // A LAN or cloud transfer pauses advertising (not a connected client) so the
+  // radio favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
+  const bool lanTransfer = wifiLan.isTransferring() || cloudOta.isTransferring();
   if (lanTransfer != lanTransferWasActive) {
     lanTransferWasActive = lanTransfer;
     if (server) {

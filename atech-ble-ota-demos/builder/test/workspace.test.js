@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {loadConfig} = require('../lib/config');
 const {rewritePlatformioIni, renderAppBuildHeader, prepareWorkspace, compileWorkspace} = require('../lib/workspace');
+const {buildFlagsEnv} = require('../lib/installer');
 
 const baseConfig = loadConfig({});
 const demo1Ini = fs.readFileSync(path.join(baseConfig.demos[1].dir, 'platformio.ini'), 'utf8');
@@ -71,4 +72,38 @@ test('compileWorkspace builds the stock app for real', {skip: !process.env.ATECH
   assert.ok(fs.existsSync(result.firmwarePath));
   assert.ok(lines.length > 10);
   assert.deepEqual(result.diagnostics.filter(d => d.severity === 'error'), []);
+});
+
+test('rewritePlatformioIni makes the OTA size-check script path absolute', () => {
+  const out = rewritePlatformioIni(demo1Ini, {sharedDir: '/abs/shared', cacheDir: '/abs/cache'});
+  assert.match(out, /^extra_scripts = post:\/abs\/shared\/tools\/check_ota_size\.py$/m);
+  assert.doesNotMatch(out, /\.\.\/shared\/tools/);
+});
+
+test('rewritePlatformioIni bakes the cloud server URL into the AI environment only', () => {
+  const out = rewritePlatformioIni(demo1Ini, {sharedDir: '/s', cacheDir: '/c', cloudUrl: 'https://api.example.com'});
+  const ai = out.slice(out.indexOf('[env:ai]'));
+  assert.match(ai, /^build_flags = .*'-DATECH_CLOUD_URL="https:\/\/api\.example\.com"'$/m);
+  const base = out.slice(out.indexOf('[env:base]'), out.indexOf('[env:updated]'));
+  assert.doesNotMatch(base, /ATECH_CLOUD_URL/);
+  assert.doesNotMatch(rewritePlatformioIni(demo1Ini, {sharedDir: '/s', cacheDir: '/c'}), /ATECH_CLOUD_URL/);
+  const stripped = demo1Ini.replace(/\n;[^\n]*\n;[^\n]*\n\[env:ai\][^\n]*\n[^\n]*\n?/, '\n');
+  const added = rewritePlatformioIni(stripped, {sharedDir: '/s', cacheDir: '/c', cloudUrl: 'https://a.b'});
+  assert.match(added.slice(added.indexOf('[env:ai]')), /-DATECH_AI_BUILD=1 '-DATECH_CLOUD_URL="https:\/\/a\.b"'/);
+});
+
+test('prepareWorkspace passes the configured public URL through to the workspace ini', async () => {
+  const config = {...tempConfig(), publicUrl: 'https://api.example.com'};
+  const meta = {buildId: 'deadbeef', appName: 'Test', appVersion: 3, targetDeviceId: ''};
+  const {dir} = await prepareWorkspace(1, {code: '#include <AtechApp.h>\nvoid appSetup() {}\nvoid appLoop() {}\n', meta}, {config});
+  const ini = fs.readFileSync(path.join(dir, 'platformio.ini'), 'utf8');
+  assert.match(ini, /ATECH_CLOUD_URL="https:\/\/api\.example\.com"/);
+  assert.match(ini, new RegExp(`extra_scripts = post:${config.sharedDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/tools/check_ota_size\\.py`));
+  fs.rmSync(config.buildsDir, {recursive: true, force: true});
+});
+
+test('buildFlagsEnv bakes the public URL into the installer base build with quotes that survive SCons', () => {
+  assert.deepEqual(buildFlagsEnv({publicUrl: null}), {});
+  // PLATFORMIO_BUILD_FLAGS goes through shlex: the outer single quotes keep the inner double quotes.
+  assert.deepEqual(buildFlagsEnv({publicUrl: 'https://a.b'}), {PLATFORMIO_BUILD_FLAGS: '\'-DATECH_CLOUD_URL="https://a.b"\''});
 });

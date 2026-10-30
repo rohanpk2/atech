@@ -14,6 +14,29 @@ const {controlMessage, hmacHex, CONTROL_OPS} = require('./lan-auth');
 const DEVICE_ID = /^ATECH-[0-9A-F]{12}$/;
 const PROBE_TIMEOUT_MS = 2500;
 const DEFAULT_PORT = 8080;
+const LAN_ONLINE_MS = 20000;
+const DEFAULT_OFFLINE_AFTER_MS = 45000;
+
+// A record is reachable by its owner, by everyone when it has no owner (simulated boards,
+// records from before ownership existed), and by a caller that presents no principal at all.
+function canAccess(record, ownerId) {
+  return !record || record.ownerId == null || ownerId == null || record.ownerId === ownerId;
+}
+
+// Identity shaped like a LAN probe answer, built from the board's last cloud report so the
+// dashboard shows the same facts whichever way the board is reachable.
+function cloudIdentity(record) {
+  const r = (record.cloud && record.cloud.lastReport) || null;
+  if (!r) return null;
+  return {
+    id: record.id, suffix: record.suffix || record.id.slice(-6), demo: Number(r.demo || record.demo || 0), fw: r.fw || record.firmware || '',
+    build: r.build || record.build || '', app: r.app || '', ver: Number(r.ver || 0), slotSize: Number(r.slotSize || 0), pending: Boolean(r.pending),
+    canRollback: false, safe: Boolean(r.safe), appState: r.safe ? 'disabled' : 'running', loops: Number(r.loops || 0), up: Number(r.up || 0),
+    otaOwner: r.transferring ? 'cloud' : '', target: '', paired: true, source: 'cloud', heap: Number(r.heap || 0), heapMin: Number(r.heapMin || 0),
+    wifi: {ssid: '', ip: '', rssi: Number(r.rssi || 0), hostname: '', mdns: '', port: 0, connected: true, transferring: Boolean(r.transferring),
+           lastTransferError: '', lastTransferMs: 0},
+  };
+}
 
 function publicRecord(record, extra = {}) {
   const {secret, ...rest} = record;
@@ -37,7 +60,7 @@ function summarizeIdentity(identity) {
 class DeviceRegistry {
   constructor({config = loadConfig(), deps = {}} = {}) {
     this.config = config;
-    this.deps = {discover: mdns.discover, resolveHost: mdns.resolveHost, request, ...deps};
+    this.deps = {discover: mdns.discover, resolveHost: mdns.resolveHost, request, now: Date.now, ...deps};
     this.file = path.join(config.buildsDir, 'devices.json');
     this.devices = new Map();
     this.live = new Map();   // id -> {identity, at, error}
@@ -58,20 +81,50 @@ class DeviceRegistry {
     try { fs.chmodSync(this.file, 0o600); } catch { /* best effort */ }
   }
 
-  list() {
-    return [...this.devices.values()].map(record => this.describe(record.id));
+  // Records the given principal may see; no principal lists everything.
+  list(ownerId = null) {
+    return [...this.devices.values()].filter(record => canAccess(record, ownerId)).map(record => this.describe(record.id));
   }
+
+  canAccess(id, ownerId) { return canAccess(this.devices.get(id) || null, ownerId); }
+
+  offlineAfterMs() { return (this.config.cloud && this.config.cloud.offlineAfterMs) || DEFAULT_OFFLINE_AFTER_MS; }
 
   describe(id) {
     const record = this.devices.get(id);
     if (!record) return null;
+    const now = this.deps.now();
     const live = this.live.get(id) || null;
+    const lanOnline = Boolean(live && live.identity && now - live.at < LAN_ONLINE_MS);
+    const cloud = record.cloud || null;
+    const lastSeenMs = cloud && cloud.lastSeenAt ? Date.parse(cloud.lastSeenAt) : NaN;
+    const cloudOnline = Boolean(cloud && Number.isFinite(lastSeenMs) && now - lastSeenMs < this.offlineAfterMs());
+    const identity = lanOnline ? live.identity : (cloud && cloud.lastReport) ? cloudIdentity(record) : (live ? live.identity : null);
     return publicRecord(record, {
-      online: Boolean(live && live.identity && Date.now() - live.at < 20000),
-      identity: live ? live.identity : null,
+      online: lanOnline || cloudOnline,
+      via: lanOnline ? 'lan' : cloudOnline ? 'cloud' : null,
+      identity,
       lastProbeAt: live ? new Date(live.at).toISOString() : null,
       lastProbeError: live ? live.error : null,
+      cloud: {
+        registered: Boolean(cloud && (cloud.registeredAt || cloud.lastSeenAt)),
+        online: cloudOnline,
+        lastSeenAt: cloud ? cloud.lastSeenAt || null : null,
+        lastReport: cloud ? cloud.lastReport || null : null,
+        lastAuthFailureAt: cloud ? cloud.lastAuthFailureAt || null : null,
+        verified: cloud ? cloud.verified !== false : null,
+      },
     });
+  }
+
+  // Merges cloud bookkeeping into a record; persistence is optional so frequent polls do not
+  // rewrite the file every time.
+  patchCloud(id, patch, {persist = true} = {}) {
+    const record = this.devices.get(id);
+    if (!record) return null;
+    record.cloud = {...(record.cloud || {}), ...patch};
+    if (persist) this.persist();
+    return record;
   }
 
   get(id) { return this.devices.get(id) || null; }
@@ -126,6 +179,9 @@ class DeviceRegistry {
     const results = [];
     let discovered = null;
     for (const record of this.devices.values()) {
+      // A board known only through the cloud has no LAN address; probing or mDNS would only
+      // add timeouts (and on a cloud host they can never answer).
+      if (!record.host && !record.hostname) { results.push(this.describe(record.id)); continue; }
       let identity = null;
       let error = null;
       if (record.host) {
@@ -208,7 +264,7 @@ class DeviceRegistry {
   }
 
   // Pairs a board: probe its identity, prove the code with an HMAC echo, store it.
-  async pair({host, port = DEFAULT_PORT, token, name = ''}) {
+  async pair({host, port = DEFAULT_PORT, token, name = '', ownerId = null}) {
     const secret = String(token || '').trim();
     if (secret.length < 16) throw new Error('The OTA authorization code is at least 16 characters (printed on the serial console at boot)');
     if (!host) throw new Error('A host or IP address is required');
@@ -221,10 +277,10 @@ class DeviceRegistry {
     if (!echo.ok) throw new Error('The board did not accept the echo');
     const record = this.upsert({id: identity.id, suffix: identity.suffix, demo: identity.demo, name: name || `Atech ${identity.suffix}`,
                                 host, port, hostname: identity.wifi.hostname, firmware: identity.fw, build: identity.build,
-                                secret, pairedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString()});
+                                secret, ownerId, pairedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString()});
     this.live.set(record.id, {identity, at: Date.now(), error: null});
     return this.describe(record.id);
   }
 }
 
-module.exports = {DeviceRegistry, summarizeIdentity, DEVICE_ID, DEFAULT_PORT, PROBE_TIMEOUT_MS};
+module.exports = {DeviceRegistry, summarizeIdentity, canAccess, cloudIdentity, DEVICE_ID, DEFAULT_PORT, PROBE_TIMEOUT_MS};
