@@ -7,7 +7,7 @@ The target experience: open the hosted dashboard in any browser (Safari on an iP
 ## 1. Architecture
 
 ```
-Safari / Chrome ──HTTPS──▶ Vercel (sign-in, dashboards, /api proxy + key + x-atech-user)
+Safari / Chrome ──HTTPS──▶ Vercel (open dashboards, /api proxy + key + x-atech-user)
                                          │ HTTPS
                                          ▼
                            Droplet: Caddy ─▶ builder container
@@ -32,7 +32,7 @@ The LAN path (backend on the same network as the board, `WIFI_LAN_OTA.md`) and B
 | --- | --- |
 | Board id | `ATECH-<12 hex MAC digits>`, from the eFuse MAC. Printed at boot, shown by the dashboards. Authorizes nothing by itself. |
 | Pairing token | The board's OTA authorization code (24 characters, about 140 bits), generated at first boot into NVS, printed on the serial console at every boot, never shown by any HTTP endpoint. It is the LAN pairing secret and the cloud pre-shared key. |
-| Owner | The dashboard principal that claimed the board: the signed-in user forwarded by Vercel as `x-atech-user`, or `local` for a backend without a dashboard key (and for a key holder that sends no header, such as an operator on an SSH tunnel). |
+| Owner | The dashboard principal that claimed the board: `ATECH_DASHBOARD_USER`, forwarded by Vercel as `x-atech-user`, or `local` for a backend without a dashboard key (and for a key holder that sends no header, such as an operator on an SSH tunnel). |
 
 **Claiming** (dashboard, step 1, **Claim a board**): enter the id, the token and an optional name. If the board has already contacted the backend (it tries every 30 s while unclaimed and leaves a commitment, the HMAC of its login challenge), the token is checked immediately and a wrong token is refused with a clear message. If the board has not contacted the backend yet, the claim is stored as waiting and checked at its first login; a mismatch is shown on the board's row.
 
@@ -163,7 +163,7 @@ Record the board revision, the Droplet name, the firmware sizes, browser and OS 
 18. Expired job: queue a job for a powered-off board and wait 30 minutes: expect **Failed (expired)**; power on: nothing is downloaded.
 19. Duplicate job: with a job pending, deploy again: expect the 409 message. Cancel the pending job: expect **Cancelled** and the board never downloads it.
 20. Wrong board: claim two boards; deploy a build bound to board A to board B: refused at create. Deploy an unbound build to A: B never receives it.
-21. Ownership: sign in with a second dashboard user (change `ATECH_DASHBOARD_USER` on a preview deployment): the first user's boards are not listed and cannot be deployed to.
+21. Ownership: deploy a preview with a different `ATECH_DASHBOARD_USER`: the first owner's boards are not listed and cannot be deployed to.
 
 **Resources**
 

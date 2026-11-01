@@ -37,7 +37,7 @@ test('exactly one route proxies /api to the backend from an environment variable
     {type: 'request.headers', op: 'set', target: {key: 'x-atech-key'}, args: '$ATECH_BUILDER_KEY', env: ['ATECH_BUILDER_KEY']},
     {type: 'request.headers', op: 'set', target: {key: 'x-atech-user'}, args: '$ATECH_DASHBOARD_USER', env: ['ATECH_DASHBOARD_USER']},
     {type: 'request.headers', op: 'delete', target: {key: 'authorization'}},
-  ], 'the backend key and the signed-in user are set server-side (set replaces a browser-sent value) and the sign-in credentials never reach the backend');
+  ], 'the backend key and the dashboard owner are set server-side (set replaces a browser-sent value) and an Authorization header never reaches the backend');
 });
 
 test('no backend host or secret is hardcoded', () => {

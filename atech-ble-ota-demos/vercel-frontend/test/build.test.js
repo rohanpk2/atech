@@ -8,7 +8,7 @@ import {validateEnv, hostedConfigSource, assembleDist} from '../build.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const GOOD_ENV = {ATECH_BACKEND_URL: 'https://api.example.com', ATECH_BUILDER_KEY: 'kEy-SeCrEt-123',
-                  ATECH_DASHBOARD_USER: 'atech', ATECH_DASHBOARD_PASSWORD: 'pw-SeCrEt-456'};
+                  ATECH_DASHBOARD_USER: 'atech', ANTHROPIC_API_KEY: 'sk-ant-secret'};
 
 async function tempDir() { return fs.mkdtemp(path.join(os.tmpdir(), 'atech-vercel-dist-')); }
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
@@ -23,10 +23,11 @@ async function walk(dir, prefix = '') {
 
 test('validateEnv names every missing variable', () => {
   const problems = validateEnv({});
-  for (const name of ['ATECH_BACKEND_URL', 'ATECH_BUILDER_KEY', 'ATECH_DASHBOARD_USER', 'ATECH_DASHBOARD_PASSWORD']) {
+  for (const name of ['ATECH_BACKEND_URL', 'ATECH_BUILDER_KEY', 'ATECH_DASHBOARD_USER']) {
     assert.ok(problems.some(p => p.includes(name)), `${name} must be reported: ${problems.join(' | ')}`);
   }
-  assert.equal(problems.length, 4);
+  assert.equal(problems.length, 3);
+  assert.ok(!problems.some(p => p.includes('ATECH_DASHBOARD_PASSWORD')), 'the dashboard has no password');
   assert.deepEqual(validateEnv(GOOD_ENV), []);
 });
 
@@ -67,7 +68,7 @@ test('assembleDist leaves no configured secret value in the output', async () =>
   await assembleDist({rootDir, outDir, env: GOOD_ENV});
   for (const file of await walk(outDir)) {
     const text = await fs.readFile(path.join(outDir, file), 'utf8');
-    assert.ok(!text.includes('kEy-SeCrEt-123') && !text.includes('pw-SeCrEt-456'), `${file} leaks a secret`);
+    assert.ok(!text.includes('kEy-SeCrEt-123') && !text.includes('sk-ant-secret'), `${file} leaks a secret`);
   }
 });
 
@@ -79,7 +80,7 @@ test('assembleDist fails when the environment is incomplete unless allowMissingE
 
 test('assembleDist refuses an output that contains a secret value', async () => {
   // A "secret" that happens to appear in a copied file must be caught by the output scan.
-  await assert.rejects(assembleDist({rootDir, outDir: await tempDir(), env: {...GOOD_ENV, ATECH_DASHBOARD_PASSWORD: 'prefers-reduced-motion'}}),
+  await assert.rejects(assembleDist({rootDir, outDir: await tempDir(), env: {...GOOD_ENV, ANTHROPIC_API_KEY: 'prefers-reduced-motion'}}),
                        /Secret value found in build output/);
 });
 

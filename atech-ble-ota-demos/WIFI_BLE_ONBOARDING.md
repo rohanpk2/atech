@@ -131,7 +131,7 @@ No new environment variables. `ATECH_BACKEND_URL` must point at the Droplet (it 
 ```sh
 cd ~/Projects/atech
 vercel pull --yes --environment=production
-ATECH_BACKEND_URL=https://<droplet name> ATECH_BUILDER_KEY=<key> ATECH_DASHBOARD_USER=<user> ATECH_DASHBOARD_PASSWORD=<password> vercel build --prod
+ATECH_BACKEND_URL=https://<droplet name> ATECH_BUILDER_KEY=<key> ATECH_DASHBOARD_USER=<user> vercel build --prod
 vercel deploy --prebuilt --prod
 ```
 

@@ -9,7 +9,6 @@ import {assembleDist} from '../build.js';
 import {createDevServer} from '../dev-server.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const AUTH = {authorization: `Basic ${Buffer.from('u:p').toString('base64')}`};
 const seen = [];
 let backend; let dev; let base;
 
@@ -35,41 +34,39 @@ test.before(async () => {
   const backendPort = await listen(backend);
   const distDir = await fs.mkdtemp(path.join(os.tmpdir(), 'atech-vercel-dev-'));
   await assembleDist({rootDir, outDir: distDir, env: {}, allowMissingEnv: true});
-  dev = createDevServer({distDir, backendUrl: `http://127.0.0.1:${backendPort}`, builderKey: 'srv-key', user: 'u', password: 'p'});
+  dev = createDevServer({distDir, backendUrl: `http://127.0.0.1:${backendPort}`, builderKey: 'srv-key'});
   base = `http://127.0.0.1:${await listen(dev)}`;
 });
 test.after(() => { dev?.close(); backend?.close(); });
 
-test('pages require the sign-in', async () => {
-  const denied = await fetch(`${base}/demo1/`);
-  assert.equal(denied.status, 401);
-  assert.equal(denied.headers.get('www-authenticate'), 'Basic realm="Atech dashboard", charset="UTF-8"');
-  const ok = await fetch(`${base}/demo1/`, {headers: AUTH});
+test('pages are served with no sign-in', async () => {
+  const ok = await fetch(`${base}/demo1/`);
   assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get('www-authenticate'), null);
   assert.match(ok.headers.get('content-type'), /text\/html/);
   assert.match(await ok.text(), /Atech Device Console/);
 });
 
 test('static files and the hosted config are served with the right types', async () => {
-  const css = await fetch(`${base}/shared/builder.css`, {headers: AUTH});
+  const css = await fetch(`${base}/shared/builder.css`);
   assert.match(css.headers.get('content-type'), /text\/css/);
-  const config = await fetch(`${base}/shared/atech-config.js`, {headers: AUTH});
+  const config = await fetch(`${base}/shared/atech-config.js`);
   assert.match(await config.text(), /"hosted":true/);
-  const demo2 = await fetch(`${base}/demo2/install.html`, {headers: AUTH});
+  const demo2 = await fetch(`${base}/demo2/install.html`);
   assert.equal(demo2.status, 200);
 });
 
 test('trailing slash and root redirects match vercel.json', async () => {
-  const noSlash = await fetch(`${base}/demo1`, {headers: AUTH, redirect: 'manual'});
+  const noSlash = await fetch(`${base}/demo1`, {redirect: 'manual'});
   assert.equal(noSlash.status, 308);
   assert.equal(noSlash.headers.get('location'), '/demo1/');
-  const root = await fetch(`${base}/`, {headers: AUTH, redirect: 'manual'});
+  const root = await fetch(`${base}/`, {redirect: 'manual'});
   assert.equal(root.status, 307);
   assert.equal(root.headers.get('location'), '/demo1/');
 });
 
 test('/api requests are proxied with the server-side key replacing any client value, query string intact', async () => {
-  const response = await fetch(`${base}/api/health?x=1`, {headers: {...AUTH, 'x-atech-key': 'client-key'}});
+  const response = await fetch(`${base}/api/health?x=1`, {headers: {authorization: 'Basic dXNlcjpwYXNz', 'x-atech-key': 'client-key'}});
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.key, 'srv-key');
@@ -77,24 +74,17 @@ test('/api requests are proxied with the server-side key replacing any client va
   assert.ok(hit, 'the backend saw the path and query');
   assert.equal(hit.headers['x-atech-key'], 'srv-key');
   assert.equal(response.headers.get('cache-control'), 'no-store', 'upstream headers pass through');
-  assert.equal(hit.headers.authorization, undefined, 'the sign-in credentials are not forwarded to the backend');
-});
-
-test('/api requests without the sign-in never reach the backend', async () => {
-  const before = seen.length;
-  const response = await fetch(`${base}/api/health?blocked=1`);
-  assert.equal(response.status, 401);
-  assert.equal(seen.length, before);
+  assert.equal(hit.headers.authorization, undefined, 'a browser Authorization header is not forwarded to the backend');
 });
 
 test('POST bodies and statuses pass through', async () => {
-  const response = await fetch(`${base}/api/builds`, {method: 'POST', headers: {...AUTH, 'content-type': 'application/json'}, body: JSON.stringify({demo: 1, prompt: 'Blink'})});
+  const response = await fetch(`${base}/api/builds`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({demo: 1, prompt: 'Blink'})});
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), {id: 'job1', echoed: {demo: 1, prompt: 'Blink'}});
 });
 
 test('binary downloads stream through unchanged', async () => {
-  const response = await fetch(`${base}/api/builds/job1/firmware.bin`, {headers: AUTH});
+  const response = await fetch(`${base}/api/builds/job1/firmware.bin`);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-disposition'), 'attachment; filename="atech-demo1-deadbeef.bin"');
   assert.equal(response.headers.get('x-atech-build-id'), 'deadbeef');
@@ -105,22 +95,22 @@ test('binary downloads stream through unchanged', async () => {
 
 test('a client that gives up on a slow backend call does not take the server down', async () => {
   const controller = new AbortController();
-  const aborted = fetch(`${base}/api/slow`, {headers: AUTH, signal: controller.signal}).catch(error => error.name);
+  const aborted = fetch(`${base}/api/slow`, {signal: controller.signal}).catch(error => error.name);
   await new Promise(resolve => setTimeout(resolve, 50));
   controller.abort();
   assert.equal(await aborted, 'AbortError');
   await new Promise(resolve => setTimeout(resolve, 600));   // the upstream answer arrives after the client left
-  const alive = await fetch(`${base}/api/health?after=abort`, {headers: AUTH});
+  const alive = await fetch(`${base}/api/health?after=abort`);
   assert.equal(alive.status, 200);
-  const slow = await fetch(`${base}/api/slow`, {headers: AUTH});
+  const slow = await fetch(`${base}/api/slow`);
   assert.deepEqual(await slow.json(), {slow: true});
 });
 
 test('path traversal is refused', async () => {
-  const encoded = await fetch(`${base}/demo1/%2e%2e/%2e%2e/package.json`, {headers: AUTH});
+  const encoded = await fetch(`${base}/demo1/%2e%2e/%2e%2e/package.json`);
   assert.equal(encoded.status, 404);
   const raw = await new Promise(resolve => {
-    const req = http.request(`${base}/../package.json`, {headers: AUTH, path: '/../package.json'}, res => { res.resume(); resolve(res.statusCode); });
+    const req = http.request(`${base}/../package.json`, {path: '/../package.json'}, res => { res.resume(); resolve(res.statusCode); });
     req.end();
   });
   assert.equal(raw, 404);

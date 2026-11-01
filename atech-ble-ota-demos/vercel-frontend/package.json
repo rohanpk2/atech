@@ -2,7 +2,7 @@
   "name": "atech-dashboards-vercel",
   "version": "0.1.0",
   "private": true,
-  "description": "Vercel frontend for the Atech dashboards: static dashboards, API proxy to the builder backend, sign-in",
+  "description": "Vercel frontend for the Atech dashboards: static dashboards and an API proxy to the builder backend",
   "type": "module",
   "scripts": {
     "build": "node build.js",
@@ -11,8 +11,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "dependencies": {
-    "@vercel/functions": "^3.10.4"
   }
 }

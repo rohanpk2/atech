@@ -17,8 +17,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SOURCES = [['demo1-custom-gatt/web', 'demo1'], ['demo2-bleota-library/web', 'demo2'], ['web-shared', 'shared']];
 const HOSTED_CONFIG = {apiBase: '', transport: 'poll', hosted: true, pollMs: 3000};
 const BACKEND_URL = /^https:\/\/[A-Za-z0-9.-]+(:[0-9]+)?$/;
-const REQUIRED = ['ATECH_BUILDER_KEY', 'ATECH_DASHBOARD_USER', 'ATECH_DASHBOARD_PASSWORD'];
-const SECRET_VARS = ['ATECH_BUILDER_KEY', 'ATECH_DASHBOARD_PASSWORD', 'ANTHROPIC_API_KEY'];
+const REQUIRED = ['ATECH_BUILDER_KEY', 'ATECH_DASHBOARD_USER'];
+const SECRET_VARS = ['ATECH_BUILDER_KEY', 'ANTHROPIC_API_KEY'];
 const MIN_SECRET_SCAN_LENGTH = 8;   // shorter values would match ordinary text by accident
 
 // Problems with the Vercel environment, one line each; empty when everything needed is there.
