@@ -65,3 +65,50 @@ test('ensureBaseBuild bakes the public URL into the base image for real', {skip:
   assert.equal(fs.readFileSync(path.join(config.demos[1].dir, '.pio', 'build', 'base', BASE_STAMP), 'utf8'), 'https://cloud.example.test');
   assert.equal(baseBuildIsStale(1, {config}), false);
 });
+
+// Base builds run in the background so a dashboard (hosted through a proxy with its own
+// timeouts) can start one and poll for it instead of holding a request open for minutes.
+test('a base build tracker starts one build per demo, joins a running one and records the outcome', async () => {
+  const {createBaseBuildTracker} = require('../lib/installer');
+  const calls = [];
+  let finish;
+  const ensure = (demo, options) => { calls.push({demo, force: options.force}); return new Promise(resolve => { finish = resolve; }); };
+  const tracker = createBaseBuildTracker({ensure});
+  assert.deepEqual(tracker.state(1), {building: false, startedAt: null, finishedAt: null, built: null, error: null});
+  const started = tracker.start(1, {config: {}});
+  assert.equal(started.building, true);
+  assert.ok(started.startedAt);
+  assert.equal(started.error, null);
+  const joined = tracker.start(1, {config: {}});
+  assert.equal(joined.building, true);
+  assert.equal(calls.length, 1, 'a second start while building does not spawn another build');
+  assert.equal(tracker.state(2).building, false, 'demos are tracked separately');
+  finish({built: true});
+  await new Promise(resolve => setImmediate(resolve));
+  const done = tracker.state(1);
+  assert.equal(done.building, false);
+  assert.equal(done.built, true);
+  assert.ok(done.finishedAt);
+  assert.equal(done.error, null);
+  tracker.start(1, {config: {}, force: true});
+  assert.equal(calls.length, 2, 'a start after completion runs again');
+  assert.equal(calls[1].force, true, 'force reaches the build');
+});
+
+test('a failed base build keeps its error until the next start', async () => {
+  const {createBaseBuildTracker} = require('../lib/installer');
+  let attempt = 0;
+  const ensure = async () => { attempt += 1; if (attempt === 1) throw new Error('pio exited 1'); return {built: true}; };
+  const tracker = createBaseBuildTracker({ensure});
+  tracker.start(2, {config: {}});
+  await new Promise(resolve => setImmediate(resolve));
+  const failed = tracker.state(2);
+  assert.equal(failed.building, false);
+  assert.equal(failed.error, 'pio exited 1');
+  assert.equal(failed.built, null);
+  const retried = tracker.start(2, {config: {}});
+  assert.equal(retried.building, true);
+  assert.equal(retried.error, null, 'a retry clears the previous error');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tracker.state(2).built, true);
+});

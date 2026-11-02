@@ -209,7 +209,9 @@ certificate is refused.
   dashboard lists claimed boards with their last contact and queues jobs for them. Bluetooth deployment
   from the browser and the firmware download for the hotspot portal work unchanged. Nothing about the
   cloud path has run on a physical board yet.
-- The USB installer (`/demo1/install.html`) needs the base image; build it once with
-  `$C run --rm builder node deploy/warm-cache.js --install-only --base` or the page's own button.
+- The USB installer (`/demo1/install.html`) needs the base image. The page builds it on the server by
+  itself the first time it is opened (a few minutes, queued with the other PlatformIO runs) and again
+  when the sources or `ATECH_PUBLIC_URL` change; to have it ready beforehand run
+  `$C run --rm builder node deploy/warm-cache.js --install-only --base` once.
 - This packaging was built and exercised on a laptop (Docker Desktop, arm64) and in the compose
   configuration; it has not been run on the Droplet itself until you run the commands above.

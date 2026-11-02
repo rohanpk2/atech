@@ -51,50 +51,78 @@ pio device monitor -b 115200</pre>
   <script>
     'use strict';
     (function () {
+      const DEMO = 1;
       const $ = id => document.getElementById(id);
-      // Same-origin API through the configured base (empty locally and on Vercel). Hosted mode
-      // cannot build the base image from the page: that is a multi-minute job for the operator.
+      // Same-origin API through the configured base (empty locally and on Vercel). The base build
+      // runs in the background on the backend: when the parts are missing or stale the page starts
+      // it by itself and polls the status until they are ready, hosted or local alike.
       const cfg = window.ATECH_CONFIG || {};
       const apiBase = String(cfg.apiBase || '').replace(/\/+$/, '');
-      if (apiBase) $('installButton').setAttribute('manifest', apiBase + '/api/installer/1/manifest.json');
-      if (cfg.hosted) $('buildBase').hidden = true;
+      const api = suffix => `${apiBase}/api/installer/${DEMO}/${suffix}`;
+      const pollMs = Number(cfg.pollMs) || 3000;
+      const where = cfg.hosted ? 'on the build service' : 'with PlatformIO';
+      if (apiBase) $('installButton').setAttribute('manifest', api('manifest.json'));
+      let timer = null;
+      let autoStarted = false;
       function setStatus(text, tone, badge) {
         $('installerStatus').textContent = text;
         $('installerStatus').className = `state ${tone}`;
         $('installerBadge').textContent = badge;
         $('installerBadge').className = `badge ${tone}`;
       }
+      function showButton(visible, enabled) {
+        $('buildBase').hidden = !visible;
+        $('buildBase').disabled = !enabled;
+      }
+      function schedule() {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, pollMs);
+      }
+      function render(status) {
+        if (status.building) {
+          setStatus(`Building the Demo ${DEMO} base image ${where}. This takes a few minutes; this page updates by itself.`, 'working', 'Building');
+          showButton(true, false);
+          schedule();
+        } else if (status.error) {
+          setStatus(`The base image build failed: ${status.error}. Click "Build the base image now" to try again.`, 'error', 'Failed');
+          showButton(true, true);
+        } else if (status.ready && !status.stale) {
+          setStatus('Base image parts are ready. Chrome or Edge on this computer can install them over USB.', 'success', 'Ready');
+          showButton(false, false);
+        } else if (!autoStarted) {
+          startBuild();
+        } else if (status.ready) {
+          setStatus('Base image parts exist but the firmware sources changed since. Click "Build the base image now" to rebuild them before installing.', 'working', 'Stale');
+          showButton(true, true);
+        } else {
+          setStatus('The base image has not been built yet. Click "Build the base image now".', 'error', 'Not built');
+          showButton(true, true);
+        }
+      }
       async function refresh() {
+        clearTimeout(timer);
         try {
-          const response = await fetch(apiBase + '/api/installer/1/status', {cache: 'no-store'});
-          const status = await response.json();
-          if (status.ready && !status.stale) {
-            setStatus('Base image parts are ready. Chrome or Edge on this computer can install them over USB.', 'success', 'Ready');
-          } else if (status.ready) {
-            setStatus('Base image parts exist but the firmware sources changed since. Rebuild before installing.', 'working', 'Stale');
-          } else if (cfg.hosted) {
-            setStatus('The base image is not available on the build service yet. Ask the operator to run deploy/warm-cache.js --base on the server.', 'error', 'Not built');
-          } else {
-            setStatus('The base image has not been built yet. Click "Build the base image now" first.', 'error', 'Not built');
-          }
+          const response = await fetch(api('status'), {cache: 'no-store'});
+          render(await response.json());
         } catch (error) {
           setStatus(cfg.hosted ? 'The build service is not reachable right now. Try again in a minute.' : 'The builder backend is not reachable. Start it with: cd builder && npm start', 'error', 'Offline');
         }
       }
-      $('buildBase').addEventListener('click', async () => {
-        $('buildBase').disabled = true;
-        setStatus('Building the Demo 1 base image with PlatformIO. This can take a few minutes the first time.', 'working', 'Building');
+      async function startBuild() {
+        autoStarted = true;
+        showButton(true, false);
+        setStatus(`Building the Demo ${DEMO} base image ${where}. This takes a few minutes; this page updates by itself.`, 'working', 'Building');
         try {
-          const response = await fetch(apiBase + '/api/installer/1/build', {method: 'POST'});
+          const response = await fetch(api('build'), {method: 'POST'});
           const body = await response.json();
           if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-          await refresh();
+          schedule();
         } catch (error) {
-          setStatus(`Build failed: ${error.message}`, 'error', 'Failed');
-        } finally {
-          $('buildBase').disabled = false;
+          setStatus(`Could not start the base build: ${error.message}`, 'error', 'Failed');
+          showButton(true, true);
         }
-      });
+      }
+      $('buildBase').addEventListener('click', startBuild);
       refresh();
     })();
   </script>

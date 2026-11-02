@@ -88,4 +88,27 @@ async function ensureBaseBuild(demo, {config = loadConfig(), force = false, onLi
   return {dir: entry.dir, built: true, log: result.log};
 }
 
-module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, buildFlagsEnv, PART_OFFSETS, PART_ORDER, BASE_STAMP};
+// Base builds in the background, one at a time per demo. A dashboard reaches the backend through
+// a proxy with its own request timeout (Vercel), so POST /build cannot hold a connection open for a
+// multi-minute compile: it starts the build here and the page polls GET /status for the outcome.
+function createBaseBuildTracker({ensure = ensureBaseBuild} = {}) {
+  const states = new Map();
+  const blank = () => ({building: false, startedAt: null, finishedAt: null, built: null, error: null});
+  const state = demo => ({...(states.get(Number(demo)) || blank())});
+  function start(demo, {config, force = false, onLine} = {}) {
+    const key = Number(demo);
+    const current = states.get(key);
+    if (current && current.building) return {...current};
+    const next = {...blank(), building: true, startedAt: new Date().toISOString()};
+    states.set(key, next);
+    let run;
+    try { run = Promise.resolve(ensure(key, {config, force, onLine})); } catch (error) { run = Promise.reject(error); }
+    run.then(result => { states.set(key, {...next, building: false, finishedAt: new Date().toISOString(), built: Boolean(result && result.built)}); },
+            error => { states.set(key, {...next, building: false, finishedAt: new Date().toISOString(), error: error.message || String(error)}); });
+    return {...next};
+  }
+  return {start, state};
+}
+
+module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, buildFlagsEnv, createBaseBuildTracker,
+                  PART_OFFSETS, PART_ORDER, BASE_STAMP};

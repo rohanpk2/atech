@@ -124,7 +124,8 @@ In a browser: open `$APP/demo1/` (no sign-in) and check that the top bar says `B
 prompt, click Generate firmware, and watch the status move through Generating, Compiling and
 Validating by polling (one short request every three seconds). The generated `user_app.cpp` shows
 under the status, and Download firmware fetches the validated image through the same origin.
-`$APP/demo1/install.html` shows whether the base image parts exist on the server.
+`$APP/demo1/install.html` shows whether the base image parts exist on the server and, when they are
+missing or stale, starts the base build there and follows it to Ready.
 
 ## What works where
 
@@ -144,9 +145,11 @@ the physical checklist: [../CLOUD_WIFI_OTA.md](../CLOUD_WIFI_OTA.md). Simulated 
 (`ATECH_SIMULATED_DEVICE` on the server) register through the cloud API too, so the hosted flow can be
 exercised end to end without hardware. **Nothing about the cloud path has run on a physical board.**
 
-The USB installer page works on Vercel (Web Serial needs HTTPS, which Vercel provides). Its
-"Build the base image now" button is hidden on the hosted site because that is a multi-minute
-job; the operator builds the parts once on the server with
+The USB installer page works on Vercel (Web Serial needs HTTPS, which Vercel provides). The base
+build runs in the background on the backend (`POST /api/installer/<demo>/build` answers 202 at once
+and `GET /api/installer/<demo>/status` reports `building`, `built` and `error`), so the page starts
+it by itself when the parts are missing or stale and polls until they are ready; a multi-minute
+compile never holds a proxied request open. The operator can still pre-build the parts with
 `sudo docker compose -f atech-ble-ota-demos/deploy/compose.yaml run --rm builder node deploy/warm-cache.js --install-only --base`.
 
 ## Local emulation

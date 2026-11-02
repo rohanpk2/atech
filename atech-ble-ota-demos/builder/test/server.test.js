@@ -146,8 +146,12 @@ test('API responses never contain the configured key, even when a provider error
     assert.doesNotMatch(await (await fetch(`${base}/api/builds`)).text(), leak);
     assert.doesNotMatch(await (await fetch(`${base}/api/builds/${id}/events`)).text(), leak);
     const installer = await fetch(`${base}/api/installer/1/build`, {method: 'POST'});
-    assert.equal(installer.status, 500);
+    assert.equal(installer.status, 202);
     assert.doesNotMatch(await installer.text(), leak);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const status = await (await fetch(`${base}/api/installer/1/status`)).json();
+    assert.equal(status.building, false);
+    assert.equal(status.error, 'pio failed with [redacted]');
   } finally {
     server.close();
     if (previous === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previous;
@@ -212,6 +216,45 @@ test('POST /api/builds/stock queues the stock app for the caller', async () => {
     const bad = await fetch(`${base}/api/builds/stock`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({demo: 7})});
     assert.equal(bad.status, 400);
   } finally {
+    server.close();
+  }
+});
+
+test('the base image builds in the background: POST starts it, GET status follows it', async () => {
+  const config = tempConfig();
+  const jobs = new JobStore({config, provider: fakeProvider([]), deps: {readApiHeader: () => '//'}});
+  let finish;
+  let starts = 0;
+  const installer = {manifest: () => ({builds: []}), partFile: () => null,
+                     ensureBaseBuild: () => { starts += 1; return new Promise(resolve => { finish = resolve; }); }};
+  const server = createServer({config, jobs, installer});
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const before = await (await fetch(`${base}/api/installer/1/status`)).json();
+    assert.equal(before.ready, false);
+    assert.equal(before.building, false);
+    assert.equal(before.error, null);
+    const started = await fetch(`${base}/api/installer/1/build`, {method: 'POST'});
+    assert.equal(started.status, 202, 'the request returns before the compile finishes');
+    const body = await started.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.building, true);
+    const again = await (await fetch(`${base}/api/installer/1/build`, {method: 'POST'})).json();
+    assert.equal(again.building, true);
+    assert.equal(starts, 1, 'a build already running is joined, not duplicated');
+    const during = await (await fetch(`${base}/api/installer/1/status`)).json();
+    assert.equal(during.building, true);
+    assert.ok(during.startedAt);
+    finish({built: true});
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const after = await (await fetch(`${base}/api/installer/1/status`)).json();
+    assert.equal(after.building, false);
+    assert.equal(after.built, true);
+    assert.equal(after.error, null);
+    assert.equal((await fetch(`${base}/api/installer/9/build`, {method: 'POST'})).status, 404, 'unknown demos are refused');
+  } finally {
+    server.closeAllConnections();
     server.close();
   }
 });

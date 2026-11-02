@@ -122,6 +122,8 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
                        pioVersion = null, simulated = [], log = () => {}}) {
   const handlers = [];
   const route = (method, pattern, handler) => handlers.push({method, pattern, handler});
+  // Base image builds run in the background; the status route reports them (see installer.js).
+  const baseBuilds = installerModule.createBaseBuildTracker({ensure: (demo, options) => installer.ensureBaseBuild(demo, options)});
   devices = devices || new DeviceRegistry({config});
   deployments = deployments || new DeploymentStore({config, jobs, devices});
   cloud = cloud || new CloudDeviceService({config, devices, log});
@@ -421,17 +423,18 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
       const file = installer.partFile(number, name, {config});
       return {name, available: Boolean(file && fs.existsSync(file))};
     });
+    const build = baseBuilds.state(number);
     sendJson(res, 200, {demo: number, ready: parts.every(p => p.available), parts,
-                        stale: installer.baseBuildIsStale ? installer.baseBuildIsStale(number, {config}) : null});
+                        stale: installer.baseBuildIsStale ? installer.baseBuildIsStale(number, {config}) : null,
+                        ...build, error: build.error === null ? null : redactSecrets(build.error)});
   });
 
+  // Starts (or joins) the base build and answers at once; the page polls GET /status for the result.
   route('POST', /^\/api\/installer\/(\d)\/build$/, async (req, res, [demo]) => {
-    try {
-      const result = await installer.ensureBaseBuild(Number(demo), {config});
-      sendJson(res, 200, {ok: true, built: result.built});
-    } catch (error) {
-      sendJson(res, 500, {error: redactSecrets(error.message)});
-    }
+    const number = Number(demo);
+    if (!config.demos[number]) { sendJson(res, 404, {error: 'Unknown demo'}); return; }
+    const build = baseBuilds.start(number, {config});
+    sendJson(res, 202, {ok: true, ...build, error: build.error === null ? null : redactSecrets(build.error)});
   });
 
   const server = http.createServer(async (req, res) => {

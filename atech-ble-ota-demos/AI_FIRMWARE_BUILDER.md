@@ -78,7 +78,7 @@ Safari has no Web Bluetooth and no Web Serial. Wi-Fi deployment does not need ei
 
 ## USB installer
 
-`/demo1/install.html` and `/demo2/install.html` use ESP Web Tools 10 with the manifest at `/api/installer/<demo>/manifest.json` (bootloader at 0x0, partitions at 0x8000, boot_app0 at 0xE000, firmware at 0x10000, all from the demo's `base` build). The page shows whether the parts exist and can trigger `pio run -e base` through the backend. ESP Web Tools' own console lets you read the boot log, which prints the device ID, pairing code and Wi-Fi credentials.
+`/demo1/install.html` and `/demo2/install.html` use ESP Web Tools 10 with the manifest at `/api/installer/<demo>/manifest.json` (bootloader at 0x0, partitions at 0x8000, boot_app0 at 0xE000, firmware at 0x10000, all from the demo's `base` build). The page shows whether the parts exist and, when they are missing or stale, runs `pio run -e base` through the backend by itself: `POST /api/installer/<demo>/build` starts the build in the background (202) and `GET /api/installer/<demo>/status` reports `building`, `built` and `error` while the page polls. Hosted dashboards behave the same; no operator step is needed. ESP Web Tools' own console lets you read the boot log, which prints the device ID, pairing code and Wi-Fi credentials.
 
 ## HTTP API
 
