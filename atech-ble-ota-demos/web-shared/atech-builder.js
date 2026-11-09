@@ -147,6 +147,9 @@
       publicUrl: null,         // the backend's public origin, provisioned into boards as the cloud server
       // Wi-Fi setup over Bluetooth: one encrypted session per connection, the board's last status.
       prov: {session: null, status: null, busy: false, timer: null, joinUntil: 0, ticks: 0},
+      // Board connections (AtechSync): the last status read over Bluetooth, the hook it came from,
+      // the change subscription and the pairing code offered to the next board.
+      sync: {status: null, busy: false, timer: null, unsubscribe: null, hookRef: null, hello: null, prefilled: '', armedUnpair: null},
     };
     try { state.selectedDeviceId = win.localStorage.getItem(`atechDevice${demo}`); } catch (_) { /* ignore */ }
 
@@ -396,6 +399,7 @@
       $('aiRollback').hidden = !(identity && identity.canRollback && canControl);
       renderDeviceList();
       renderProv();
+      renderSync();
     }
 
     // ---------------------------------------------------------------- Wi-Fi setup over Bluetooth
@@ -412,14 +416,18 @@
     function provSession() {
       const hook = provisioning();
       if (!hook) throw new Error('Connect the board over Bluetooth first');
-      if (!state.prov.session) state.prov.session = hook.session();
+      // A session belongs to one board: a different hook (another board connected) starts afresh.
+      if (state.prov.session && state.prov.sessionHook !== hook) dropProvSession();
+      if (!state.prov.session) { state.prov.session = hook.session(); state.prov.sessionHook = hook; }
       return state.prov.session;
     }
 
     function dropProvSession() {
+      state.sync.hello = null;
       if (!state.prov.session) return;
       try { state.prov.session.close(); } catch (_) { /* ignore */ }
       state.prov.session = null;
+      state.prov.sessionHook = null;
     }
 
     function cloudWords(cloud) {
@@ -669,6 +677,287 @@
         renderProv();
         pollProvStatus().catch(() => {});
       }
+    }
+
+    // ---------------------------------------------------------------- Board connections (AtechSync)
+    // The transport exposes `sync` when the connected board has the sync status service:
+    // {available(), readStatus() -> status JSON, subscribe(handler) -> unsubscribe}. Commands go
+    // through the Bluetooth setup session (sealed; pairing changes carry the owner grant, like a
+    // Wi-Fi change) when the board is connected over Bluetooth, else through the backend, which
+    // relays them over the LAN or queues them for the board's next cloud poll. "Paired" is
+    // configuration; "Connected" means a frame from the peer in the last few seconds, nothing less.
+    const syncModule = root.AtechSync;
+    const DEMO_KEY = syncModule ? syncModule.DEMO_KEY : 'demo.power';
+
+    function syncHook() {
+      const hook = transport.sync;
+      if (!hook || typeof hook.available !== 'function' || !hook.available() || !transport.isConnected()) return null;
+      return hook;
+    }
+
+    function syncSource() {
+      if (!syncModule) return null;
+      if (syncHook()) return 'ble';
+      const device = selectedDevice();
+      if (device && device.identity && device.identity.sync) return 'backend';
+      return null;
+    }
+
+    function syncBoardId() {
+      if (syncSource() === 'backend') return selectedDevice().id;
+      const identity = transport.identity();
+      return identity && DEVICE_ID.test(identity.id) ? identity.id : '';
+    }
+
+    function currentSyncStatus() {
+      const source = syncSource();
+      if (!source) return null;
+      if (source === 'ble') return state.sync.status ? syncModule.normalizeStatus(state.sync.status, syncBoardId()) : null;
+      const device = selectedDevice();
+      return syncModule.normalizeStatus(device.identity.sync, device.id);
+    }
+
+    function formatAgoMs(ms) {
+      const seconds = Math.max(0, Math.round(ms / 1000));
+      if (seconds < 60) return `${seconds} s ago`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+      return `${Math.round(seconds / 3600)} h ago`;
+    }
+
+    function storedSyncCode() {
+      try { return syncModule.loadCode(win.sessionStorage); } catch (_) { return null; }
+    }
+
+    function stopSyncPolling() {
+      if (state.sync.timer) { clearInterval(state.sync.timer); state.sync.timer = null; }
+    }
+
+    function unsubscribeSync() {
+      if (state.sync.unsubscribe) { try { state.sync.unsubscribe(); } catch (_) { /* ignore */ } }
+      state.sync.unsubscribe = null;
+      state.sync.hookRef = null;
+    }
+
+    async function pollSyncStatus() {
+      const hook = syncHook();
+      if (!hook || state.sync.busy || transferInFlight()) return;
+      try { state.sync.status = await hook.readStatus(); } catch (_) { /* keep the previous status */ }
+      renderSync();
+    }
+
+    function onSyncChange(bytes) {
+      const change = syncModule.parseChange(bytes);
+      if (!change) return;
+      if (change.k !== undefined) {
+        if (state.sync.status) {
+          if (!state.sync.status.state || typeof state.sync.status.state !== 'object') state.sync.status.state = {};
+          state.sync.status.state[change.k] = {v: change.v, t: change.t, rev: change.rev, by: change.by};
+        }
+        log(`${change.k} is now ${change.v}${change.remote ? ` (changed on ${change.by})` : ' (set on this board)'}.`, 'BOARD SYNC');
+        renderSync();
+      } else if (change.peer) {
+        log(`Peer ${change.peer}: ${change.state}.`, 'BOARD SYNC', change.state === 'connected' ? 'success' : 'warn');
+        pollSyncStatus().catch(() => {});
+      } else if (change.event) {
+        log(`Event ${change.event} from ${change.from}${change.payload ? ` (${change.payload})` : ''}.`, 'BOARD SYNC');
+      }
+    }
+
+    // Keeps the Bluetooth status fresh: one subscription per hook and a slow read, so a board
+    // swapped under the same dashboard is never shown with the previous board's status.
+    function trackSyncHook(hook) {
+      if (state.sync.hookRef === hook) return;
+      unsubscribeSync();
+      state.sync.status = null;
+      state.sync.hookRef = hook;
+      if (typeof hook.subscribe === 'function') { try { state.sync.unsubscribe = hook.subscribe(onSyncChange); } catch (_) { state.sync.unsubscribe = null; } }
+      if (!state.sync.timer) state.sync.timer = setInterval(() => { pollSyncStatus().catch(() => {}); }, provPollMs * 2);
+      pollSyncStatus().catch(() => {});
+    }
+
+    function renderSync() {
+      const panel = $('syncPanel');
+      if (!panel) return;
+      const source = syncSource();
+      if (!source) {
+        panel.hidden = true;
+        stopSyncPolling();
+        unsubscribeSync();
+        state.sync.status = null;
+        return;
+      }
+      panel.hidden = false;
+      if (source === 'ble') trackSyncHook(syncHook());
+      else { stopSyncPolling(); unsubscribeSync(); }
+      const s = currentSyncStatus();
+      const id = (s && s.id) || syncBoardId();
+      $('syncSelf').textContent = id || 'Unknown';
+      let badge = 'Not paired';
+      let tone = 'neutral';
+      let text;
+      if (!s) {
+        badge = 'Reading';
+        text = 'Reading the board\'s connection status.';
+      } else if (s.paired && s.connected) {
+        badge = 'Connected'; tone = 'success';
+        text = `Communicating with ${s.peer} over ESP-NOW.`;
+      } else if (s.paired && s.peerState === 'pairing') {
+        badge = 'Pairing'; tone = 'working';
+        text = `Waiting for ${s.peer} to confirm the pairing. Make sure it is powered on and nearby.`;
+      } else if (s.paired) {
+        badge = 'Paired, not communicating'; tone = 'error';
+        text = `Paired with ${s.peer}, but no answer in the last few seconds. Power it on, and keep both boards on the same Wi-Fi network or both off Wi-Fi.`;
+      } else {
+        text = 'Not paired. Click Connect another board to get a pairing code, then pair the second board with it.';
+      }
+      if (s && s.paused) text += ' Paused while a firmware update runs.';
+      if (s && s.channelMismatch) text += ' The boards are on different Wi-Fi channels: they must share one network or both leave Wi-Fi.';
+      $('syncBadge').textContent = badge;
+      $('syncBadge').className = `badge ${tone}`;
+      $('syncState').textContent = text;
+      $('syncState').className = `state ${tone}`;
+      $('syncPeer').textContent = s && s.peer ? s.peer : 'None';
+      $('syncLink').textContent = !s ? 'Unknown' : s.lastAckAgoMs === null ? 'Unknown' : s.lastAckAgoMs < 0 ? 'Never' : formatAgoMs(s.lastAckAgoMs);
+      const value = s ? s.value : null;
+      $('syncValue').textContent = value === null ? 'Not set yet' : value === 'true' ? 'On' : value === 'false' ? 'Off' : value;
+      $('syncToggle').textContent = `Turn ${DEMO_KEY} ${value === 'true' ? 'off' : 'on'}`;
+      $('syncToggle').disabled = state.sync.busy || !s;   // never a blind toggle before a status exists
+      $('syncConnect').disabled = state.sync.busy;
+      $('syncUnpair').hidden = !(s && s.paired);
+      $('syncUnpair').disabled = state.sync.busy;
+      // The code this board issued (from its status, or the one we stored when we asked for it).
+      const stored = storedSyncCode();
+      const ownCode = (s && s.pairingCode) || (stored && stored.from === id ? stored.code : '');
+      $('syncCode').hidden = !ownCode;
+      if (ownCode) $('syncCode').value = ownCode;
+      // A code from another board: offered to this one; a code typed by hand is accepted too.
+      const offered = stored && stored.from && stored.from !== id ? stored : null;
+      const input = $('syncPairInput');
+      if (offered && (input.value.trim() === '' || input.value.trim() === state.sync.prefilled)) { input.value = offered.code; state.sync.prefilled = offered.code; }
+      const typed = input.value.trim();
+      $('syncPair').hidden = !typed;
+      $('syncPair').textContent = offered && typed === offered.code ? `Pair with ${offered.from}` : 'Pair with this code';
+      $('syncPair').disabled = state.sync.busy;
+    }
+
+    // One command, over whichever connection exists. pairingOp: the change needs the owner's
+    // authority on an owned board (grant or BOOT press), exactly like a Wi-Fi change.
+    async function syncCommand(payload, {pairingOp = false} = {}) {
+      const source = syncSource();
+      if (!source) return {ok: false, error: 'No connection to the board'};
+      if (source === 'ble') {
+        if (!provisioning()) return {ok: false, error: 'This firmware has no Bluetooth setup service; flash the current base image'};
+        const session = provSession();
+        if (pairingOp || !session.hasKey() || !state.sync.hello) state.sync.hello = await session.hello();
+        const request = {...payload};
+        let denied = null;
+        if (pairingOp && state.sync.hello.locked) {
+          const id = provBoardId();
+          if (id) { const result = await provGrant(id, state.sync.hello); if (result.grant) request.grant = result.grant; else denied = result.denied; }
+        }
+        const reply = await session.sync(request);
+        if (!reply.ok && /locked/i.test(reply.error || '')) {
+          return {ok: false, locked: true, error: `${denied ? `${denied}. ` : ''}This board has an owner. Press the BOOT button on the board once, then try again within two minutes.`};
+        }
+        return {ok: Boolean(reply.ok), error: reply.error, code: reply.code, via: 'ble'};
+      }
+      const device = selectedDevice();
+      const response = await api(`/api/devices/${device.id}/sync`, {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(payload)});
+      let body = {};
+      try { body = await response.json(); } catch (_) { body = {}; }
+      if (!response.ok) return {ok: false, error: body.error || `HTTP ${response.status}`, via: 'backend'};
+      if (body.queued) return {ok: true, queued: true, pollMs: Number(body.pollMs) || 15000, via: 'cloud'};
+      const result = body.result || {};
+      return {ok: Boolean(result.ok), error: result.error, code: result.code, via: 'lan'};
+    }
+
+    function queuedHint(result) {
+      return `Queued; the board picks it up within ${Math.max(1, Math.round(result.pollMs / 1000))} s. This block updates when the board reports back.`;
+    }
+
+    async function runSyncCommand(work) {
+      if (!syncSource() || state.sync.busy) return;
+      state.sync.busy = true;
+      renderSync();
+      try { await work(); }
+      catch (error) {
+        $('syncHint').textContent = `Board sync failed: ${error.message}`;
+        log(`Board sync failed: ${error.message}`, 'BOARD SYNC', 'error');
+        if (syncSource() === 'ble') dropProvSession();
+      } finally {
+        state.sync.busy = false;
+        renderSync();
+        if (syncSource() === 'ble') pollSyncStatus().catch(() => {});
+        else refreshDevices({probe: !hosted}).catch(() => {});
+      }
+    }
+
+    function connectAnotherBoard() {
+      return runSyncCommand(async () => {
+        const id = syncBoardId();
+        const result = await syncCommand({op: 'code'}, {pairingOp: true});
+        if (result.queued) { $('syncHint').textContent = `${queuedHint(result)} The pairing code appears here once the board reports it.`; return; }
+        if (!result.ok) { $('syncHint').textContent = result.error || 'The board refused to issue a pairing code.'; log(`Pairing code refused: ${result.error}`, 'BOARD SYNC', 'error'); return; }
+        if (result.code) {
+          try { syncModule.storeCode(win.sessionStorage, {code: result.code, from: id, at: Date.now()}); } catch (_) { /* private mode */ }
+          $('syncCode').value = result.code;
+          $('syncCode').hidden = false;
+        }
+        $('syncHint').textContent = `Pairing code issued; it is valid for ten minutes. Now connect the other board (over Bluetooth, or pick it in the list above) and click Pair with ${id}. ` +
+                                    `On a serial console the same code is accepted with: sync pair ${result.code || '<code>'}`;
+        log(`Pairing code issued by ${id}.`, 'BOARD SYNC', 'success');
+      });
+    }
+
+    function pairWithCode() {
+      const code = $('syncPairInput').value.trim();
+      if (!syncModule.CODE_PATTERN.test(code)) {
+        $('syncHint').textContent = 'Enter a pairing code that looks like ATSYNC1-<board>-<channel>-<key>, from the other board\'s Board connections block or its serial console (sync code).';
+        $('syncPairInput').focus();
+        return;
+      }
+      const id = syncBoardId();
+      if (syncModule.issuerOf(code) === id) { $('syncHint').textContent = 'That code was issued by this board; use it on the other board.'; return; }
+      return runSyncCommand(async () => {
+        const result = await syncCommand({op: 'pair', code}, {pairingOp: true});
+        if (result.queued) { $('syncHint').textContent = queuedHint(result); return; }
+        if (!result.ok) { $('syncHint').textContent = result.error || 'The board refused the pairing code.'; log(`Pairing refused: ${result.error}`, 'BOARD SYNC', 'error'); return; }
+        const stored = storedSyncCode();
+        if (stored && stored.code === code) { try { syncModule.storeCode(win.sessionStorage, null); } catch (_) { /* ignore */ } }
+        $('syncPairInput').value = '';
+        state.sync.prefilled = '';
+        $('syncHint').textContent = `Pairing with ${syncModule.issuerOf(code)} requested. Both boards show Connected within a few seconds when they can hear each other.`;
+        log(`${id} is pairing with ${syncModule.issuerOf(code)}.`, 'BOARD SYNC', 'success');
+      });
+    }
+
+    function unpairBoard() {
+      if (!state.sync.armedUnpair || Date.now() - state.sync.armedUnpair > 6000) {
+        state.sync.armedUnpair = Date.now();
+        $('syncUnpair').textContent = 'Click again to unpair';
+        setTimeout(() => { state.sync.armedUnpair = null; $('syncUnpair').textContent = 'Unpair'; }, 6000);
+        return;
+      }
+      state.sync.armedUnpair = null;
+      $('syncUnpair').textContent = 'Unpair';
+      return runSyncCommand(async () => {
+        const result = await syncCommand({op: 'unpair'}, {pairingOp: true});
+        if (result.queued) { $('syncHint').textContent = queuedHint(result); return; }
+        $('syncHint').textContent = result.ok ? 'The board forgot its paired board. The other board notices within a few seconds.' : result.error;
+        log(result.ok ? 'Unpaired.' : `Unpair refused: ${result.error}`, 'BOARD SYNC', result.ok ? 'success' : 'error');
+      });
+    }
+
+    function toggleDemoState() {
+      return runSyncCommand(async () => {
+        const s = currentSyncStatus();
+        const next = !(s && s.value === 'true');
+        const result = await syncCommand({op: 'set', key: DEMO_KEY, value: next ? 'true' : 'false'});
+        if (result.queued) { $('syncHint').textContent = queuedHint(result); return; }
+        if (!result.ok) { $('syncHint').textContent = result.error || 'The board refused the change.'; return; }
+        $('syncHint').textContent = '';
+        log(`${DEMO_KEY} set to ${next} on ${syncBoardId()}${s && s.connected ? `; ${s.peer} follows within a second` : ''}.`, 'BOARD SYNC', 'success');
+      });
     }
 
     function renderDeviceList() {
@@ -1524,6 +1813,12 @@
     $('provJoin').addEventListener('click', () => { joinWifi(); });
     $('provForget').addEventListener('click', () => { forgetWifi(); });
     $('provPassword').addEventListener('keydown', event => { if (event.key === 'Enter') joinWifi(); });
+    $('syncToggle').addEventListener('click', () => { toggleDemoState(); });
+    $('syncConnect').addEventListener('click', () => { connectAnotherBoard(); });
+    $('syncPair').addEventListener('click', () => { pairWithCode(); });
+    $('syncUnpair').addEventListener('click', () => { unpairBoard(); });
+    $('syncPairInput').addEventListener('input', () => { renderSync(); });
+    $('syncPairInput').addEventListener('keydown', event => { if (event.key === 'Enter') pairWithCode(); });
     for (const method of ['wifi', 'ble', 'hotspot']) {
       $(`method${method[0].toUpperCase()}${method.slice(1)}`).addEventListener('click', () => {
         if (state.busy) return;

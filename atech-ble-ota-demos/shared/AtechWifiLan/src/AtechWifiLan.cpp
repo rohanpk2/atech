@@ -34,6 +34,7 @@ constexpr size_t NONCE_SLOTS = 4;
 constexpr uint32_t NONCE_TTL_MS = 90000;
 constexpr size_t SESSION_ID_BYTES = 16;
 constexpr size_t RECV_BUFFER_BYTES = 16 * 1024;
+constexpr size_t SYNC_BODY_MAX = 1024;   // POST /api/sync form body
 constexpr size_t CHUNK_MAX_BYTES = 256 * 1024;
 constexpr size_t MIN_IMAGE_BYTES = 1024;
 constexpr size_t APP_PREFIX_SIZE =
@@ -203,6 +204,7 @@ struct AtechWifiLan::Impl {
   bool initialized = false;
   bool stationWanted = false;
   bool apActive = false;
+  bool radioHold = false;   // ESP-NOW wants the driver started (AtechSync)
   volatile bool gotIp = false;
   volatile bool servicesPending = false;
   bool mdnsStarted = false;
@@ -293,9 +295,9 @@ struct AtechWifiLan::Impl {
 
   void applyMode() {
     wifi_mode_t mode = WIFI_OFF;
-    if (apActive && stationWanted) mode = WIFI_AP_STA;
+    if (apActive && (stationWanted || radioHold)) mode = WIFI_AP_STA;
     else if (apActive) mode = WIFI_AP;
-    else if (stationWanted) mode = WIFI_STA;
+    else if (stationWanted || radioHold) mode = WIFI_STA;
     WiFi.mode(mode);
   }
 
@@ -497,6 +499,10 @@ struct AtechWifiLan::Impl {
     if (config.extraIdentity) {
       const String extra = config.extraIdentity();
       if (extra.startsWith("{")) { identity += F(",\"cloud\":"); identity += extra; }
+    }
+    if (config.syncIdentity) {
+      const String sync = config.syncIdentity();
+      if (sync.startsWith("{")) { identity += F(",\"sync\":"); identity += sync; }
     }
     identity += F("}");
     return identity;
@@ -924,6 +930,42 @@ struct AtechWifiLan::Impl {
     return sendJson(req, 200, body);
   }
 
+  // Board-to-board sync relayed by the backend: the HMAC proves the board's owner, so the command
+  // runs privileged (pairing codes, pair, unpair, set, toggle, event).
+  static esp_err_t handleSync(httpd_req_t *req) {
+    Impl *impl = self(req);
+    if (!impl->take()) return sendError(req, 503, F("Service busy"));
+    const esp_err_t result = impl->sync(req);
+    impl->give();
+    return result;
+  }
+
+  esp_err_t sync(httpd_req_t *req) {
+    const String device = header(req, "X-Atech-Device");
+    const String nonce = header(req, "X-Atech-Nonce");
+    const String auth = header(req, "X-Atech-Auth");
+    if (device != atech::deviceId()) return sendError(req, 403, String(F("Request addressed to another board; this board is ")) + atech::deviceId());
+    if (!config.syncCommand) return sendError(req, 503, F("This image has no board-to-board sync"));
+    if (req->content_len > SYNC_BODY_MAX) return sendError(req, 413, F("Request body too large"));
+    char buffer[SYNC_BODY_MAX + 1];
+    size_t got = 0;
+    while (got < req->content_len) {
+      const int read = httpd_req_recv(req, buffer + got, req->content_len - got);
+      if (read <= 0) return sendError(req, 400, F("Could not read the request body"));
+      got += static_cast<size_t>(read);
+    }
+    buffer[got] = '\0';
+    const String body(buffer);
+    if (!consumeNonce(nonce)) return sendError(req, 401, F("Unknown, used or expired nonce; request a new challenge"));
+    String message = F("atech-sync/1\n");
+    message += device; message += '\n';
+    String nonceLower = nonce; nonceLower.toLowerCase();
+    message += nonceLower; message += '\n';
+    message += body; message += '\n';
+    if (!verifyAuth(message, auth)) return sendError(req, 401, F("Authorization failed"));
+    return sendJson(req, 200, config.syncCommand(body));
+  }
+
   static esp_err_t handleNotFound(httpd_req_t *req, httpd_err_code_t) {
     return sendError(req, 404, F("Not found"));
   }
@@ -936,7 +978,7 @@ struct AtechWifiLan::Impl {
     httpdConfig.stack_size = 8192;
     httpdConfig.core_id = 0;
     httpdConfig.max_open_sockets = 4;
-    httpdConfig.max_uri_handlers = 10;
+    httpdConfig.max_uri_handlers = 12;
     httpdConfig.lru_purge_enable = true;
     httpdConfig.recv_wait_timeout = 10;
     httpdConfig.send_wait_timeout = 10;
@@ -954,6 +996,7 @@ struct AtechWifiLan::Impl {
         {"/api/ota/finish", HTTP_POST, handleFinish, this},
         {"/api/ota/abort", HTTP_POST, handleAbort, this},
         {"/api/control", HTTP_POST, handleControl, this},
+        {"/api/sync", HTTP_POST, handleSync, this},
     };
     for (const httpd_uri_t &route : routes) httpd_register_uri_handler(server, &route);
     httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, handleNotFound);
@@ -1137,6 +1180,15 @@ String AtechWifiLan::scanLines(size_t maxNetworks) {
   if (before != WiFi.getMode()) _impl->applyMode();
   return lines;
 }
+
+void AtechWifiLan::setRadioHold(bool hold) {
+  if (!_impl) return;
+  _impl->radioHold = hold;
+  _impl->applyMode();
+  if (hold) WiFi.setSleep(false);
+}
+
+bool AtechWifiLan::radioHeld() const { return _impl && _impl->radioHold; }
 
 void AtechWifiLan::setSoftApActive(bool active) {
   if (!_impl) return;

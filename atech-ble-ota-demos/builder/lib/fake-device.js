@@ -7,7 +7,7 @@
 // SIMULATION: nothing here measures real ESP32 flash or radio performance.
 const crypto = require('node:crypto');
 const http = require('node:http');
-const {beginMessage, controlMessage, hmacHex, constantTimeEqual} = require('./lan-auth');
+const {beginMessage, controlMessage, syncMessage, hmacHex, constantTimeEqual} = require('./lan-auth');
 
 const NONCE_TTL_MS = 90000;
 const CHUNK_MAX = 256 * 1024;
@@ -29,13 +29,13 @@ function syntheticFirmware({demo = 1, build = 'stock', target = '', size = 64 * 
 
 function createFakeDevice({
   id = 'ATECH-A1B2C3D4E5F6', demo = 1, build = 'stock', app = 'blue default', ver = 1, secret = 'fixture-ota-token-0123456789',
-  slotSize = 0x600000, host = '127.0.0.1', port = 0, rebootMs = 800, faults = {}, log = () => {},
+  slotSize = 0x600000, host = '127.0.0.1', port = 0, rebootMs = 800, faults = {}, log = () => {}, sync = null,
 } = {}) {
   const state = {
     id, suffix: id.slice(-6), demo, build, app, ver, fw: `simulated demo${demo} build ${build}`, secret, slotSize,
     pending: false, canRollback: false, safe: false, loops: 0, bootAt: Date.now(), otaOwner: '', previousBuild: null,
     nonces: new Map(), session: null, rebooting: false, lastTransferError: '', lastTransferMs: 0, confirmCount: 0,
-    events: [], faults: {...faults}, port, ip: host, stopped: false, rebootTimer: null,
+    events: [], faults: {...faults}, port, ip: host, stopped: false, rebootTimer: null, sync,
   };
   const note = (text) => { state.events.push(text); log(text); };
 
@@ -51,6 +51,7 @@ function createFakeDevice({
             hostname: `atech-${state.suffix.toLowerCase()}`, mdns: `atech-${state.suffix.toLowerCase()}.local`, port: state.port, proto: 1,
             service: true, transferring: Boolean(state.session), ap_active: false, last_disconnect_reason: 0,
             last_transfer_error: state.lastTransferError, last_transfer_ms: state.lastTransferMs},
+      ...(state.sync ? {sync: state.sync.status()} : {}),
     };
   }
 
@@ -216,6 +217,24 @@ function createFakeDevice({
       if (!session || !constantTimeEqual(session.id, header('X-Atech-Session'))) { fail(res, 409, 'No matching upload session'); return; }
       abortSession('Aborted by the backend');
       json(res, 200, {ok: true, stage: 'aborted'});
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/sync') {
+      const device = header('X-Atech-Device');
+      if (device !== state.id) { fail(res, 403, `Request addressed to another board; this board is ${state.id}`); return; }
+      if (!state.sync) { fail(res, 503, 'This image has no board-to-board sync'); return; }
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (body.length > 1024) { fail(res, 413, 'Request body too large'); return; }
+        if (!consumeNonce(header('X-Atech-Nonce'))) { fail(res, 401, 'Unknown, used or expired nonce; request a new challenge'); return; }
+        const expected = hmacHex(state.secret, syncMessage({deviceId: device, nonce: header('X-Atech-Nonce'), body}));
+        if (!constantTimeEqual(expected, header('X-Atech-Auth').toLowerCase())) { fail(res, 401, 'Authorization failed'); return; }
+        const result = state.sync.command(body, true);
+        note(`sync ${new URLSearchParams(body).get('op')}: ${result.ok ? 'ok' : result.error}`);
+        json(res, 200, result.ok ? {ok: true, ...(result.code ? {code: result.code} : {})} : {ok: false, error: result.error});
+      });
       return;
     }
     if (req.method === 'POST' && path === '/api/control') {

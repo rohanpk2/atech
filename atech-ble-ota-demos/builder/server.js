@@ -19,6 +19,8 @@ const {createDeviceHandler} = require('./lib/cloud-routes');
 const {provisionGrantHex, CloudError} = require('./lib/cloud-auth');
 const {createFakeDevice} = require('./lib/fake-device');
 const {createFakeCloudDevice} = require('./lib/fake-cloud-device');
+const {createSyncBus, createFakeSync} = require('./lib/fake-sync');
+const {SYNC_OPS} = require('./lib/lan-auth');
 const installerModule = require('./lib/installer');
 const {selectProvider} = require('./lib/generate');
 const {runPio} = require('./lib/pio');
@@ -244,6 +246,36 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
     if (!devices.canAccess(id, principalOf(req, config))) { forbidden(res); return; }
     try { sendJson(res, 200, await devices.control(id, String(body.op || '').toLowerCase())); }
     catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); }
+  });
+
+  // Board-to-board sync: relay a command to the board over the LAN when it is reachable there,
+  // otherwise queue it for the board's next cloud poll. Both paths carry the board's own token,
+  // so the board runs the command as its owner's.
+  route('POST', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/sync$/, async (req, res, [id]) => {
+    const body = await readJson(req);
+    const principal = principalOf(req, config);
+    const record = devices.get(id);
+    if (!record) { sendJson(res, 404, {error: `Unknown device ${id}`}); return; }
+    if (!devices.canAccess(id, principal)) { forbidden(res); return; }
+    const op = String(body.op || '').toLowerCase();
+    if (!SYNC_OPS.includes(op)) { sendJson(res, 400, {error: `Unsupported sync operation; expected one of ${SYNC_OPS.join(', ')}`}); return; }
+    const params = new URLSearchParams({op});
+    for (const field of ['key', 'value', 'type', 'code', 'name', 'payload']) {
+      if (body[field] !== undefined && body[field] !== null) params.set(field, String(body[field]));
+    }
+    const form = params.toString();
+    const described = devices.describe(id);
+    if (described.via === 'lan' && record.host) {
+      try { sendJson(res, 200, {ok: true, via: 'lan', result: await devices.sync(id, form)}); }
+      catch (error) { sendJson(res, 502, {error: redactSecrets(error.message)}); }
+      return;
+    }
+    if (record.secret && described.cloud && described.cloud.registered) {
+      cloud.queueCommand(id, form);
+      sendJson(res, 202, {ok: true, via: 'cloud', queued: true, pollMs: config.cloud.pollMs});
+      return;
+    }
+    sendJson(res, 409, {error: `${id} is not reachable right now: not on this network and not reporting to the cloud`});
   });
 
   // ---- deployments: over the LAN (backend to board) or through the cloud (board pulls) ----
@@ -544,16 +576,28 @@ async function main() {
 async function startSimulatedDevices(config, devices, {baseUrl = null, log = text => console.log(`  ${text}`)} = {}) {
   const spec = String(config.simulatedDevices || '').trim().toLowerCase();
   if (!spec || spec === '0' || spec === 'false') return [];
+  // A demo listed twice ("1,1") gives two Demo 1 boards with distinct ids, so the dashboard can pair
+  // two simulated boards; every simulated board shares one in-process ESP-NOW bus.
   const demos = spec === 'all' || spec === 'true' ? [1, 2] : spec.split(',').map(Number).filter(n => n === 1 || n === 2);
   const started = [];
+  const bus = createSyncBus({delayMs: 5});
+  const perDemo = {};
   for (const demo of demos.length ? demos : [1]) {
-    const id = `ATECH-51D0000000E${demo}`;
-    const secret = `simulated-board-${demo}-authorization-code`;
-    const device = createFakeDevice({id, demo, build: 'stock', secret, host: '127.0.0.1', port: 0, rebootMs: 1500,
+    const index = perDemo[demo] || 0;
+    perDemo[demo] = index + 1;
+    const id = `ATECH-51D000000${index % 10}E${demo}`;
+    const secret = `simulated-board-${demo}-${index}-authorization-code`;
+    const sync = createFakeSync({id, bus, log: text => log(`[simulated ${id} sync] ${text}`)});
+    sync.start();
+    const device = createFakeDevice({id, demo, build: 'stock', secret, host: '127.0.0.1', port: 0, rebootMs: 1500, sync,
                                      log: text => log(`[simulated ${id}] ${text}`)});
     const {host, port} = await device.start();
-    devices.upsert({id, suffix: id.slice(-6), demo, name: `Simulated Demo ${demo} board`, host, port, hostname: `atech-${id.slice(-6).toLowerCase()}`,
+    devices.upsert({id, suffix: id.slice(-6), demo, name: index ? `Simulated Demo ${demo} board ${index + 1}` : `Simulated Demo ${demo} board`,
+                    host, port, hostname: `atech-${id.slice(-6).toLowerCase()}`,
                     firmware: device.state.fw, build: 'stock', secret, simulated: true, ownerId: null, pairedAt: new Date().toISOString()});
+    device.sync = sync;
+    const stopLan = device.stop;
+    device.stop = async () => { sync.stop(); await stopLan(); };
     started.push(device);
   }
   if (baseUrl) attachSimulatedCloudAgents(started, {baseUrl, config, log});
@@ -567,7 +611,7 @@ function attachSimulatedCloudAgents(simulated, {baseUrl, config, log = text => c
     if (device.cloudAgent) continue;
     const {id, demo, secret} = device.state;
     const agent = createFakeCloudDevice({id, demo, secret, baseUrl, state: device.state, pollMs: Math.min(config.cloud.pollMs, 5000),
-                                         chunkBytes: config.cloud.chunkBytes, log: text => log(`[simulated ${id} cloud] ${text}`)});
+                                         chunkBytes: config.cloud.chunkBytes, sync: device.sync || null, log: text => log(`[simulated ${id} cloud] ${text}`)});
     agent.start();
     device.cloudAgent = agent;
     const stopLan = device.stop;

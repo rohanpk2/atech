@@ -8,6 +8,7 @@
 #include <AtechBleProv.h>
 #include <AtechCloudOta.h>
 #include <AtechCore.h>
+#include <AtechSync.h>
 #include <AtechWifiLan.h>
 #include <AtechWifiOta.h>
 #include <BLEDevice.h>
@@ -61,6 +62,7 @@ AtechWifiOtaPortal wifiOta;
 AtechWifiLan wifiLan;
 AtechCloudOta cloudOta;
 AtechBleProv bleProv;
+AtechSync boardSync;
 volatile bool connected = false;
 volatile bool abortRequested = false;
 bool wasConnected = false;
@@ -91,8 +93,36 @@ String lanAuthToken() {
 }
 
 bool cloudHoldsConfirm() { return cloudOta.holdsConfirm(); }
-// A short BOOT press lets an owned board accept new Wi-Fi or server settings over Bluetooth.
-void handleShortPress() { bleProv.noteButtonPress(); }
+// A short BOOT press lets an owned board accept new Wi-Fi or server settings over Bluetooth, and
+// is published to the application (and the paired board) as a generic "button.pressed" event.
+void handleShortPress() {
+  bleProv.noteButtonPress();
+  boardSync.emitEvent("button.pressed");
+}
+
+// Board-to-board sync hooks. The LAN route and the cloud poll relay the owner's dashboard (both
+// paths prove the board's pairing token), so their commands run privileged.
+String jsonQuote(const String &text) {
+  String out;
+  out.reserve(text.length() + 2);
+  for (size_t i = 0; i < text.length(); ++i) {
+    const char c = text[i];
+    if (c == '"' || c == '\\') { out += '\\'; out += c; }
+    else if (static_cast<uint8_t>(c) >= 0x20) out += c;
+  }
+  return out;
+}
+String syncCommandJson(const String &form) {
+  const AtechSyncResult result = boardSync.command(form, true);
+  String json = result.ok ? String(F("{\"ok\":true")) : String(F("{\"ok\":false"));
+  if (!result.code.isEmpty()) { json += F(",\"code\":\""); json += jsonQuote(result.code); json += '"'; }
+  if (!result.ok) { json += F(",\"error\":\""); json += jsonQuote(result.error); json += '"'; }
+  json += '}';
+  return json;
+}
+String syncIdentity() { return boardSync.statusJson(); }
+String syncReport() { return boardSync.compactStatusJson(); }
+void syncCloudCommand(const String &form) { boardSync.command(form, true); }
 String cloudIdentity() { return cloudOta.statusJson(); }
 bool homeWifiConnected() { return wifiLan.isConnected(); }
 
@@ -186,6 +216,7 @@ void setup() {
   provConfig.cloud = &cloudOta;
   provConfig.authToken = lanAuthToken;
   provConfig.busy = anyOtaBusy;
+  provConfig.sync = &boardSync;
   provConfig.unlockWindowMs = 120000;
   provConfig.preferencesNamespace = "atech_prov";
   if (!bleProv.begin(provConfig)) {
@@ -208,8 +239,23 @@ void setup() {
   lanConfig.authToken = lanAuthToken;
   lanConfig.otherOtaBusy = lanBlockedByOthers;
   lanConfig.extraIdentity = cloudIdentity;
+  lanConfig.syncCommand = syncCommandJson;
+  lanConfig.syncIdentity = syncIdentity;
   if (!wifiLan.begin(lanConfig)) {
     Serial.printf("Wi-Fi LAN service initialization failed: %s\n", wifiLan.lastError().c_str());
+  }
+
+  // Board-to-board sync over ESP-NOW (shared/AtechSync): pairing, a shared key-value state and
+  // events, kept in agreement with the paired board without any backend. Needs the Wi-Fi driver
+  // (started by the LAN module's radio hold) and reports through the LAN identity and the cloud poll.
+  AtechSyncConfig syncConfig = {};
+  syncConfig.server = server;
+  syncConfig.lan = &wifiLan;
+  syncConfig.otaBusy = anyOtaBusy;
+  syncConfig.preferencesNamespace = "atech_sync";
+  syncConfig.serialConsole = true;
+  if (!boardSync.begin(syncConfig)) {
+    Serial.printf("Board sync initialization failed: %s\n", boardSync.lastError().c_str());
   }
 
   // Cloud OTA agent: outbound HTTPS to the builder backend, device-pulled deployments.
@@ -228,6 +274,8 @@ void setup() {
   cloudConfig.authToken = lanAuthToken;
   cloudConfig.otherOtaBusy = cloudBlockedByOthers;
   cloudConfig.wifiConnected = homeWifiConnected;
+  cloudConfig.extraReport = syncReport;
+  cloudConfig.command = syncCloudCommand;
   if (!cloudOta.begin(cloudConfig)) {
     Serial.printf("Cloud OTA agent initialization failed: %s\n", cloudOta.lastError().c_str());
   }
@@ -264,6 +312,7 @@ void loop() {
   wifiOta.loop();
   cloudOta.loop();
   bleProv.loop();
+  boardSync.loop();
   // A LAN or cloud transfer pauses advertising (not a connected client) so the
   // radio favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
   const bool lanTransfer = wifiLan.isTransferring() || cloudOta.isTransferring();

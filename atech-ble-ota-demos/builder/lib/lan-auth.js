@@ -15,6 +15,14 @@ function controlMessage({deviceId, nonce, op}) {
   return `atech-control/1\n${deviceId}\n${String(nonce).toLowerCase()}\n${String(op).toLowerCase()}\n`;
 }
 
+// Board-to-board sync command relayed over the LAN (shared/AtechSync through AtechWifiLan): the
+// whole form body is signed so a relayed command cannot be altered in flight.
+const SYNC_OPS = Object.freeze(['code', 'pair', 'unpair', 'set', 'toggle', 'event', 'status']);
+
+function syncMessage({deviceId, nonce, body}) {
+  return `atech-sync/1\n${deviceId}\n${String(nonce).toLowerCase()}\n${String(body)}\n`;
+}
+
 function hmacHex(secret, message) {
   return crypto.createHmac('sha256', String(secret)).update(message, 'utf8').digest('hex');
 }
@@ -29,4 +37,4 @@ function constantTimeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-module.exports = {PROTOCOL, CONTROL_OPS, beginMessage, controlMessage, hmacHex, sha256Hex, constantTimeEqual};
+module.exports = {PROTOCOL, CONTROL_OPS, SYNC_OPS, beginMessage, controlMessage, syncMessage, hmacHex, sha256Hex, constantTimeEqual};

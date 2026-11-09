@@ -23,7 +23,10 @@ const KNOWN_IDS = new Set(['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSumm
   // the first method card is relabelled Cloud Wi-Fi for a cloud-registered board
   'methodWifi',
   // Wi-Fi setup over Bluetooth (step 1)
-  'provPanel', 'provState', 'provSsid', 'provNetworks', 'provPassword', 'provScan', 'provJoin', 'provForget', 'provProgress', 'provHint']);
+  'provPanel', 'provState', 'provSsid', 'provNetworks', 'provPassword', 'provScan', 'provJoin', 'provForget', 'provProgress', 'provHint',
+  // board connections (step 1): pairing two boards and the shared demo state
+  'syncPanel', 'syncBadge', 'syncState', 'syncSelf', 'syncPeer', 'syncLink', 'syncValue', 'syncToggle', 'syncConnect', 'syncCode',
+  'syncPairInput', 'syncPair', 'syncUnpair', 'syncHint']);
 const referenced = [...source.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]);
 assert.ok(referenced.length > 10, 'module must address the builder card by element id');
 assert.deepEqual(referenced.filter(id => !KNOWN_IDS.has(id)), [], 'every referenced id must be documented');
@@ -65,5 +68,12 @@ assert.match(source, /\/api\/devices\/claim/, 'claiming goes through the backend
 assert.match(source, /via: 'cloud'/, 'cloud deployments are requested explicitly');
 assert.match(source, /Cloud Wi-Fi/, 'the cloud path is named');
 assert.doesNotMatch(source, /fetch\((?!apiUrl)/, 'fetch must only be called through apiUrl');
+
+// Board connections: commands reach a board only over a connection that exists; "connected" is live.
+assert.match(source, /\/api\/devices\/\$\{[^}]+\}\/sync/, 'backend-reached boards get sync commands through the relay route');
+assert.match(source, /Paired, not communicating/, 'a configured pairing without recent traffic is never shown as connected');
+assert.match(source, /Queued; the board picks it up/, 'a cloud-queued command is reported as queued, not applied');
+assert.match(source, /sessionStorage/, 'the pairing code is kept for the next board in this tab only');
+assert.match(source, /pairingOp: true/, 'pairing changes ask for the owner grant like a Wi-Fi change');
 
 console.log('Atech builder UI structure tests passed');

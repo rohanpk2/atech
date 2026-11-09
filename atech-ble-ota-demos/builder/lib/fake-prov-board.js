@@ -18,6 +18,7 @@ const OP_HELLO = 1;
 const OP_SCAN = 2;
 const OP_PROVISION = 3;
 const OP_FORGET = 4;
+const OP_SYNC = 5;
 const HKDF_INFO = 'atech-prov/1';
 
 // The sealed plaintext is a form body on both sides: strings percent-encoded, booleans 1/0.
@@ -51,7 +52,7 @@ function fragment(message) {
 
 function createFakeProvBoard({
   id = 'ATECH-A1B2C3D4E5F6', token = 'fixture-ota-token-0123456789', locked = false, networks = [], faults = {},
-  unlockWindowMs = 120000, allowHttp = false, now = Date.now,
+  unlockWindowMs = 120000, allowHttp = false, now = Date.now, sync = null,
 } = {}) {
   const state = {
     id, locked, unlockUntil: 0, ssid: '', pass: '', url: '', joining: false, connected: false, ip: '', rssi: 0, reason: 0,
@@ -162,6 +163,23 @@ function createFakeProvBoard({
     answer({ok: true});
   }
 
+  // Board-to-board sync over the sealed session: pairing ops (code, pair, unpair) are gated like a
+  // Wi-Fi change on an owned board; state and events are not.
+  function syncRequest(body) {
+    let request;
+    try { request = unseal(OP_SYNC, body); } catch (error) { errorReply(error.message); return; }
+    const answer = object => reply(OP_SYNC | REPLY_BIT, sealed(OP_SYNC | REPLY_BIT, object));
+    const op = String(request.op || '');
+    const privileged = authorized(request.grant);
+    if (['code', 'pair', 'unpair'].includes(op) && !privileged) { answer({ok: false, error: 'This board is locked: it already has an owner. Ask the owner\'s dashboard for a grant or press the BOOT button once'}); return; }
+    if (!sync) { answer({ok: false, error: 'This image has no board-to-board sync'}); return; }
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(request)) if (key !== 'grant' && value !== undefined && value !== null) params.set(key, String(value));
+    const result = sync.command(params.toString(), privileged);
+    state.requests.push({...request, syncOp: request.op, op: 'sync', grant: request.grant ? '<grant>' : undefined});
+    answer(result.ok ? {ok: true, ...(result.code ? {code: result.code} : {})} : {ok: false, error: result.error});
+  }
+
   function handle(message) {
     const opcode = message[0];
     const body = message.subarray(1);
@@ -169,6 +187,7 @@ function createFakeProvBoard({
     else if (opcode === OP_SCAN) scan();
     else if (opcode === OP_PROVISION) provision(body);
     else if (opcode === OP_FORGET) forget(body);
+    else if (opcode === OP_SYNC) syncRequest(body);
     else errorReply(`Unknown request ${opcode}`);
   }
 

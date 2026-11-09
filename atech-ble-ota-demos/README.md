@@ -16,7 +16,7 @@ Bluetooth (desktop Chrome) is also how a new board is put on Wi-Fi in the first 
 | --- | --- |
 | `builder/` | Node backend. Talks to the model, compiles, validates, deploys, and serves the dashboards. |
 | `web-shared/` | The dashboard card shared by both demos. |
-| `shared/` | Protected firmware core: device identity, sandboxed app task, Wi-Fi setup over Bluetooth, Wi-Fi (LAN and cloud) and Bluetooth OTA, rollback, safe mode. Generated code never touches it. |
+| `shared/` | Protected firmware core: device identity, sandboxed app task, Wi-Fi setup over Bluetooth, Wi-Fi (LAN and cloud) and Bluetooth OTA, rollback, safe mode, and board-to-board sync over ESP-NOW (`AtechSync`). Generated code never touches it; it reaches the shared state through `atech::sync::*`. |
 | `demo1-custom-gatt/` | Demo 1: Atech's own Bluetooth protocol. |
 | `demo2-bleota-library/` | Demo 2: the same system on the open-source `gb88/BLEOTA` library (AGPL-3.0). |
 | `deploy/` | Docker packaging for running the backend on a server. |
@@ -42,13 +42,18 @@ No laptop? The dashboards can run on Vercel with the backend on a server: see [v
 
 After that, every update is wireless, from any browser. Builds generated before 2026-10-29 must be generated again before a cloud deployment: their images predate the Bluetooth setup service. No Bluetooth on this computer? The board's hotspot page still works: hold **BOOT** for three seconds, join `Atech-OTA-…`, open http://192.168.4.1, enter the authorization code printed on the serial console, join your Wi-Fi, then **Claim a board** with the same code. See [WIFI_BLE_ONBOARDING.md](WIFI_BLE_ONBOARDING.md).
 
+## Two boards
+
+Two boards running the current firmware keep a shared state in agreement over ESP-NOW with no router or backend in the path. The stock app shows one boolean, `demo.power`, on both LEDs: a short press of **BOOT** on either board toggles both. Pair them from the serial console (`sync code` on one board, `sync pair <code>` on the other), from the dashboard's **Board connections** block over Bluetooth, or through the backend. See [BOARD_SYNC.md](BOARD_SYNC.md) for the exact commands, the two-board test procedure and the limits. Two simulated boards: `ATECH_SIMULATED_DEVICE=1,1 npm start`.
+
 ## Status
 
-Compiles, passes the automated tests, and works end to end against a simulated board, including the cloud path and the Bluetooth Wi-Fi setup. **Nothing has been verified on a physical ESP32-S3 yet** beyond reading the boot log of the attached board (WIFI_BLE_ONBOARDING.md section 9). These are prototypes: updates are authenticated with a per-device key and integrity-checked, but firmware is not cryptographically signed.
+Compiles, passes the automated tests (including host-compiled tests of the board-to-board sync engine), and works end to end against simulated boards, including the cloud path, the Bluetooth Wi-Fi setup and pairing two simulated boards. **Nothing has been verified on a physical ESP32-S3 yet** beyond reading the boot log of the attached board (WIFI_BLE_ONBOARDING.md section 9). These are prototypes: updates are authenticated with a per-device key and integrity-checked, but firmware is not cryptographically signed.
 
 ## More
 
 - [WIFI_BLE_ONBOARDING.md](WIFI_BLE_ONBOARDING.md): one-time Wi-Fi setup over Bluetooth, the end-to-end cloud OTA flow, exact flash, redeploy and validation commands.
+- [BOARD_SYNC.md](BOARD_SYNC.md): board-to-board sync over ESP-NOW: pairing, the shared state, the two-board test procedure, channel modes, security notes.
 - [AI_FIRMWARE_BUILDER.md](AI_FIRMWARE_BUILDER.md): what generated code may do, validation, identity and recovery.
 - [WIFI_LAN_OTA.md](WIFI_LAN_OTA.md): Wi-Fi provisioning, deployment protocol, security review, browser support.
 - [CLOUD_WIFI_OTA.md](CLOUD_WIFI_OTA.md): cloud deployments from the hosted dashboard, device API, claiming, rollback, the physical checklist.

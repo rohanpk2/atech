@@ -61,6 +61,7 @@ function createDeviceHandler({cloud, cloudDeployments, now = Date.now}) {
           job: job ? job.job : '', build: job ? job.build : '', size: job ? job.size : '', sha256: job ? job.sha256 : '', demo: job ? job.demo : '',
           app: job ? job.app : '', ver: job ? job.ver : '', url: job ? job.url : '', chunk: job ? job.chunk : '',
           ack: result.ack ? result.ack.jobId : '', action: result.ack ? result.ack.action : '',
+          sync: cloud.takeCommand(deviceId) || '',
         });
         return true;
       }

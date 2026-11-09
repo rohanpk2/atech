@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include "AtechAppApi.h"
+#include "AtechSyncApp.h"
 
 using atech::led;
 

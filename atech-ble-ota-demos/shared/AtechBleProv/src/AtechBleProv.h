@@ -13,11 +13,13 @@
 class BLEServer;
 class AtechWifiLan;
 class AtechCloudOta;
+class AtechSync;
 
 struct AtechBleProvConfig {
   BLEServer *server;                  // the demo's GATT server (service created in begin)
   AtechWifiLan *lan;                  // station-mode Wi-Fi (credentials, scan, status)
   AtechCloudOta *cloud;               // cloud agent (server URL, login state)
+  AtechSync *sync;                    // optional: board-to-board sync (pairing codes, state, events) over the same sealed session
   String (*authToken)();              // the pairing token (OTA authorization code); released only to an authorized client
   bool (*busy)();                     // true while any OTA transport owns flash: changes are refused
   uint32_t unlockWindowMs;            // how long a BOOT press unlocks an owned board (120000)

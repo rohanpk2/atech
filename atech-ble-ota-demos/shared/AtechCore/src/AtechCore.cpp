@@ -28,7 +28,7 @@ void appLoop();
 
 namespace {
 
-constexpr char ATECH_CORE_VERSION[] = "1.2.0";
+constexpr char ATECH_CORE_VERSION[] = "1.3.0";
 constexpr char IDENTITY_SERVICE_UUID[] = "a7ec0100-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char IDENTITY_CHAR_UUID[] = "a7ec0101-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char CONTROL_CHAR_UUID[] = "a7ec0102-2e47-4dd2-82a4-9c2cf6eaa001";
@@ -82,6 +82,7 @@ uint32_t restartAtMs = 0;
 int lastCoreLedState = -1;
 portMUX_TYPE otaLock = portMUX_INITIALIZER_UNLOCKED;
 char otaOwnerText[12] = "";
+void (*appIdleHook)() = nullptr;
 
 const char *appStateName() {
   switch (appState) {
@@ -142,6 +143,7 @@ void appTaskMain(void *) {
       continue;
     }
     appLoop();
+    if (appIdleHook) appIdleHook();
     loopCounter = loopCounter + 1;
     vTaskDelay(1);
   }
@@ -446,6 +448,8 @@ void coreResumeApp() {
 }
 
 bool coreAppRunning() { return appTask && appState == Running; }
+
+void coreSetAppIdleHook(void (*hook)()) { appIdleHook = hook; }
 
 void setLedOwner(LedOwner newOwner) {
   owner = newOwner;

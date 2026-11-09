@@ -37,6 +37,8 @@ The acceptance prompt "Make the onboard LED blink three times quickly, pause for
 
 ## What generated code can do
 
+Since 2026-11-09 the app header also exposes `atech::sync::*` (shared state and events with a paired board over ESP-NOW; see [BOARD_SYNC.md](BOARD_SYNC.md)). The system prompt tells the model to use it only when the request mentions another board or shared state. `AtechSync` itself is a protected core library and is refused by the source policy like the others.
+
 Generated files include only `<AtechApp.h>` (plus standard headers) and define `void appSetup()` and `void appLoop()`. The app runs on its own FreeRTOS task on core 1, so blocking `delay()` is fine and never stalls BLE, OTA or the Wi-Fi portal.
 
 | Available | Not available in this version |

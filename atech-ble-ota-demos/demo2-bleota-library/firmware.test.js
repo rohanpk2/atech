@@ -31,7 +31,15 @@ assert.match(main, /wifiOta\.isUpdating\(\)/, 'the app pauses only during an act
 assert.match(main, /#include <AtechCloudOta\.h>/, 'the cloud OTA agent is part of every image');
 assert.match(main, /cloudOta\.isTransferring\(\)/, 'gb88 BLEOTA and the cloud agent never write flash at the same time');
 
+assert.match(main, /#include <AtechSync\.h>/, 'board-to-board sync is part of every image');
+assert.match(main, /AtechSync boardSync;/);
+assert.match(main, /boardSync\.begin\(/);
+assert.match(main, /boardSync\.loop\(\)/);
+assert.match(main, /boardSync\.emitEvent\("button\.pressed"\)/, 'a short BOOT press is published as a generic event');
+
 assert.match(userApp, /#include <AtechApp\.h>/);
+assert.match(userApp, /atech::sync::onChange\(/, 'the stock app renders the shared demo state');
+assert.match(userApp, /"demo\.power"/);
 assert.match(userApp, /void appSetup\(\)/);
 assert.match(userApp, /void appLoop\(\)/);
 assert.match(appBuild, /#define ATECH_BUILD_ID "stock"/);

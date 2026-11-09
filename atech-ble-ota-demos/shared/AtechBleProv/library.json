@@ -1,6 +1,6 @@
 {
   "name": "AtechBleProv",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Shared Bluetooth Wi-Fi onboarding service for the Atech ESP32-S3 demos: encrypted provisioning of Wi-Fi credentials, the cloud server URL and the pairing token over the dashboard's existing GATT connection, with an owner grant or BOOT press once the board has an owner",
   "frameworks": "arduino",
   "platforms": "espressif32",

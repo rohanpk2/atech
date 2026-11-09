@@ -22,7 +22,7 @@ function validateHeader(buf) {
 
 function createFakeCloudDevice({
   id = 'ATECH-A1B2C3D4E5F6', demo = 1, secret = 'fixture-ota-token-0123456789', baseUrl, build = 'stock', state = null,
-  faults = {}, pollMs = 60, chunkBytes = 64 * 1024, log = () => {}, fetchImpl = globalThis.fetch,
+  faults = {}, pollMs = 60, chunkBytes = 64 * 1024, log = () => {}, fetchImpl = globalThis.fetch, sync = null,
 } = {}) {
   const shared = state || {};
   const defaults = {
@@ -32,7 +32,7 @@ function createFakeCloudDevice({
   for (const [key, value] of Object.entries(defaults)) if (shared[key] === undefined) shared[key] = value;
   const device = {
     state: shared, faults, events: [], stats: {logins: 0, unclaimed: 0, authFailed: 0, polls: 0, downloads: 0, reports: 0, ranges: [], rollbacks: 0},
-    session: null, running: false, loop: null, controller: null,
+    session: null, running: false, loop: null, controller: null, sync,
   };
   const note = text => { device.events.push(text); log(text); };
 
@@ -42,7 +42,8 @@ function createFakeCloudDevice({
     s.loops = s.safe ? 0 : Math.floor(up / 40);
     const body = {demo: String(s.demo), fw: s.fw, build: s.build, app: s.app, ver: String(s.ver), slot_size: String(s.slotSize), core: 'sim', agent: '1',
                   pending: s.pending ? '1' : '0', safe: s.safe ? '1' : '0', up: String(up), loops: String(s.loops), rssi: '-51',
-                  heap: String(faults.heap || 180000), heap_min: String(faults.heap || 150000), ...extra};
+                  heap: String(faults.heap || 180000), heap_min: String(faults.heap || 150000),
+                  ...(device.sync ? {sync: JSON.stringify(device.sync.compact())} : {}), ...extra};
     return new URLSearchParams(body).toString();
   }
 
@@ -221,6 +222,7 @@ function createFakeCloudDevice({
     const kv = parseKv(await response.text());
     device.stats.polls++;
     if (kv.ack) await handleAck(kv.ack, kv.action);
+    if (kv.sync && device.sync) { const result = device.sync.command(kv.sync, true); note(`sync command from the cloud: ${result.ok ? 'ok' : result.error}`); }
     if (kv.job && ready) await runJob(kv);
     await wait(Number(kv.poll) > 0 ? Math.min(Number(kv.poll), pollMs) : pollMs);
   }

@@ -97,3 +97,11 @@ test('a reference to a protected core library by name is a policy violation', ()
   assert.equal(checkSource(GOOD.replace('atech::log("ready");', '// AtechBleProv is mentioned in a comment only\n  atech::log("ready");')).ok, true,
                'comments never trigger the rule');
 });
+
+test('the shared state API is allowed while the sync module itself is protected', () => {
+  const ok = checkSource(GOOD.replace('atech::log("ready");', 'atech::sync::setBool("demo.power", true); atech::log("ready");'));
+  assert.equal(ok.ok, true, JSON.stringify(ok.violations));
+  const refused = checkSource(GOOD.replace('atech::log("ready");', 'AtechSync sync; atech::log("ready");'));
+  assert.equal(refused.ok, false);
+  assert.ok(rules(refused).includes('forbidden-api'));
+});

@@ -1,0 +1,11 @@
+{
+  "name": "AtechSync",
+  "version": "1.0.0",
+  "description": "Board-to-board state and event synchronization over ESP-NOW for the Atech ESP32-S3 demos: portable engine (versioned key-value store, acknowledgments, retries, pairing, reconciliation) plus the ESP32 wrapper with AES-GCM sealing, NVS, a BLE status service and a serial console",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "src",
+    "srcFilter": ["+<*.cpp>", "-<../test/>"]
+  }
+}

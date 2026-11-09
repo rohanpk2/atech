@@ -83,6 +83,31 @@
             <p id="provHint" class="hint"></p>
           </div>
 
+          <div id="syncPanel" class="sync" hidden>
+            <div class="sync-head">
+              <h3>Board connections</h3>
+              <span id="syncBadge" class="badge neutral">Not paired</span>
+            </div>
+            <p id="syncState" class="state neutral" aria-live="polite"></p>
+            <dl class="facts sync-facts">
+              <div><dt>This board</dt><dd id="syncSelf" class="mono">Unknown</dd></div>
+              <div><dt>Paired board</dt><dd id="syncPeer" class="mono">None</dd></div>
+              <div><dt>Last acknowledged</dt><dd id="syncLink">Never</dd></div>
+              <div><dt>demo.power</dt><dd id="syncValue">Not set yet</dd></div>
+            </dl>
+            <div class="actions">
+              <button id="syncToggle" class="btn primary" type="button">Turn demo.power on</button>
+              <button id="syncConnect" class="btn secondary" type="button">Connect another board</button>
+              <button id="syncUnpair" class="btn text" type="button" hidden>Unpair</button>
+            </div>
+            <input id="syncCode" class="sync-code" type="text" readonly spellcheck="false" aria-label="Pairing code for the other board" hidden>
+            <div class="sync-form">
+              <input id="syncPairInput" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Pairing code from the other board (ATSYNC1-...)">
+              <button id="syncPair" class="btn secondary" type="button" hidden>Pair with this code</button>
+            </div>
+            <p id="syncHint" class="hint"></p>
+          </div>
+
           <details id="devFacts" class="disclosure" hidden>
             <summary>Board details</summary>
             <dl class="facts disclosure-body">
@@ -289,6 +314,7 @@
   <script src="/shared/atech-config.js?v=1"></script>
   <script src="/shared/atech-identity.js?v=4"></script>
   <script src="/shared/atech-provision.js?v=1"></script>
+  <script src="/shared/atech-sync.js?v=1"></script>
   <script src="/shared/atech-builder.js?v=6"></script>
   <script src="protocol.js?v=4"></script>
   <script src="app.js?v=4"></script>

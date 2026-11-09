@@ -12,7 +12,7 @@ assert.equal(api.SERVICE, 'a7ec0200-2e47-4dd2-82a4-9c2cf6eaa001');
 assert.equal(api.STATUS_CHAR, 'a7ec0201-2e47-4dd2-82a4-9c2cf6eaa001');
 assert.equal(api.REQUEST_CHAR, 'a7ec0202-2e47-4dd2-82a4-9c2cf6eaa001');
 assert.equal(api.REPLY_CHAR, 'a7ec0203-2e47-4dd2-82a4-9c2cf6eaa001');
-assert.deepEqual(api.OPS, {hello: 1, scan: 2, provision: 3, forget: 4});
+assert.deepEqual(api.OPS, {hello: 1, scan: 2, provision: 3, forget: 4, sync: 5});
 assert.equal(api.MAX_FRAGMENT, 240);
 assert.equal(api.MAX_MESSAGE, 1024);
 assert.ok(source.includes("'atech-prov/1'"), 'HKDF info string');

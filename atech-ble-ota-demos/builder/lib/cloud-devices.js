@@ -16,14 +16,27 @@ const MAX_SESSIONS_PER_BOARD = 4;
 const MAX_REGISTRATIONS = 64;
 const REGISTRATION_TTL_MS = 10 * 60 * 1000;
 const PERSIST_INTERVAL_MS = 30000;
+const COMMAND_TTL_MS = 10 * 60 * 1000;
 const LIMITS = {ip: {capacity: 60, perMinute: 60}, id: {capacity: 20, perMinute: 20}};
 
 const truthy = value => value === true || value === '1' || value === 'true';
 const number = value => { const n = Number(value); return Number.isFinite(n) ? n : 0; };
 
+// The board's compact sync status (shared/AtechSync compactStatusJson), sent as sync=<JSON>.
+function parseSyncReport(text) {
+  if (!text) return null;
+  let parsed;
+  try { parsed = JSON.parse(String(text)); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {paired: Boolean(parsed.paired), connected: Boolean(parsed.connected), peer: String(parsed.peer || ''),
+          peerState: String(parsed.peerState || 'none'), code: String(parsed.code || ''),
+          state: parsed.state && typeof parsed.state === 'object' ? parsed.state : {}};
+}
+
 // Fields a board sends with login and poll, as strings from a form body, normalized once.
 function normalizeReport(info = {}) {
   return {
+    sync: parseSyncReport(info.sync),
     demo: number(info.demo), fw: String(info.fw || ''), build: String(info.build || ''), app: String(info.app || ''), ver: number(info.ver),
     slotSize: number(info.slot_size), core: String(info.core || ''), agent: info.agent === undefined ? null : String(info.agent),
     pending: truthy(info.pending), safe: truthy(info.safe), up: number(info.up), loops: number(info.loops), rssi: number(info.rssi),
@@ -56,6 +69,7 @@ class CloudDeviceService {
     this.nonces = new Map();          // id -> [{nonce, issuedAt}]
     this.sessions = new Map();        // token -> {deviceId, issuedAt, expiresAt}
     this.registrations = new Map();   // id -> {id, nonce, proof, info, seenAt, authFailed}
+    this.commands = new Map();        // id -> {form, queuedAt, expiresAt}: one pending sync command per board
     this.lastPersist = new Map();     // id -> ms
     this.limiter = new RateLimiter(now);
   }
@@ -130,6 +144,24 @@ class CloudDeviceService {
     this.lastPersist.set(id, issuedAt);
     this.log(`cloud: ${id} logged in (build ${report.build || '?'})`);
     return {session: token, expiresAt: issuedAt + SESSION_TTL_MS, pollMs: this.config.cloud.pollMs};
+  }
+
+  // A board-to-board sync command for a board the backend cannot reach: handed out with the next
+  // poll answer as sync=<form>. One slot per board; a newer command replaces an undelivered one.
+  queueCommand(id, form, ttlMs = COMMAND_TTL_MS) {
+    this.commands.set(id, {form: String(form), queuedAt: this.now(), expiresAt: this.now() + ttlMs});
+  }
+
+  takeCommand(id) {
+    const entry = this.commands.get(id);
+    if (!entry) return null;
+    this.commands.delete(id);
+    return this.now() < entry.expiresAt ? entry.form : null;
+  }
+
+  pendingCommand(id) {
+    const entry = this.commands.get(id);
+    return entry && this.now() < entry.expiresAt ? entry.form : null;
   }
 
   revokeSessions(id) {
@@ -221,4 +253,4 @@ class CloudDeviceService {
   }
 }
 
-module.exports = {CloudDeviceService, normalizeReport, NONCE_TTL_MS, SESSION_TTL_MS};
+module.exports = {CloudDeviceService, normalizeReport, parseSyncReport, NONCE_TTL_MS, SESSION_TTL_MS};

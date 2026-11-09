@@ -83,8 +83,11 @@ assert.match(app, /AtechBuilder\.mount\(/, 'app.js must mount the shared builder
 assert.match(app, /async function deployBytes\(/, 'OTA must accept bytes so the builder can deploy without a file');
 assert.match(app, /pendingOtaVerification\.buildId/, 'post-reboot verification must compare the build id when known');
 assert.match(app, /pendingOtaVerification\.deviceIdentity/, 'post-reboot verification must compare the Atech device id');
-assert.match(app, /optionalServices: \[SERVICE, AtechIdentity\.IDENTITY_SERVICE, AtechProvision\.SERVICE\]/);
+assert.match(app, /optionalServices: \[SERVICE, AtechIdentity\.IDENTITY_SERVICE, AtechProvision\.SERVICE, AtechSync\.SERVICE\]/);
 assert.match(app, /AtechProvision\.createSession\(/, 'app.js must build the Wi-Fi setup session from the provisioning characteristics');
+assert.match(app, /AtechSync\.STATUS_CHAR/, 'app.js must expose the board sync status service to the builder');
+assert.ok(html.indexOf('/shared/atech-sync.js') < html.indexOf('/shared/atech-builder.js'), 'the sync module must load before the builder');
+assert.match(html, /Board connections/, 'step 1 must carry the board connections block');
 assert.ok(html.indexOf('/shared/atech-provision.js') < html.indexOf('/shared/atech-builder.js'), 'the provisioning module must load before the builder');
 assert.match(app, /window\.AtechDemo1Transport/, 'app.js must expose the transport for the builder');
 

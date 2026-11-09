@@ -65,6 +65,15 @@ for (const line of impl.split('\n').filter(l => /Serial\.print/.test(l))) {
   assert.doesNotMatch(line, /token\.c_str|authToken\(\)/, `a Serial line must not print the token: ${line.trim()}`);
 }
 
+// Board-to-board sync commands ride the same sealed session: pairing ops are grant-gated.
+assert.match(impl, /OP_SYNC\s*=\s*0x05\b/, 'the sync opcode is 0x05');
+assert.ok(impl.includes('config.sync->command('), 'sync commands are delegated to AtechSync');
+assert.ok(header.includes('AtechSync *sync;'), 'the provisioning config carries the sync module');
+const syncHandler = impl.match(/void sync\(const uint8_t \*body, size_t length\) \{[\s\S]*?\n  \}/);
+assert.ok(syncHandler, 'a sync() request handler exists');
+assert.match(syncHandler[0], /authorized\(grant\)/, 'pairing ops need the owner grant or a BOOT press');
+assert.match(syncHandler[0], /"code"[\s\S]*"pair"[\s\S]*"unpair"/, 'code, pair and unpair are the privileged ops');
+
 // Public API and the two small additions in neighbouring libraries.
 for (const method of ['bool begin(const AtechBleProvConfig &', 'void loop()', 'void noteButtonPress()', 'bool isLocked() const', 'String statusJson()']) {
   assert.ok(header.includes(method), `AtechBleProv.h must declare ${method}`);

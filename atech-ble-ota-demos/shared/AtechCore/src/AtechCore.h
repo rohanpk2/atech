@@ -38,6 +38,9 @@ void coreLoop();
 void coreSuspendApp();
 void coreResumeApp();
 bool coreAppRunning();
+// Optional hook run on the application task right after every appLoop() pass. AtechSync uses it
+// to deliver state and event notifications to the app without touching the core's own tasks.
+void coreSetAppIdleHook(void (*hook)());
 
 // LED arbitration between dashboard commands and the generated app
 enum class LedOwner : uint8_t { Off = 0, BlinkBlue = 1, BlinkGreen = 2, App = 3 };

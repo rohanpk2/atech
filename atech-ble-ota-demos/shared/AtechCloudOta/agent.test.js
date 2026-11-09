@@ -85,7 +85,7 @@ assert.ok(header.includes('String (*authToken)()') && header.includes('bool (*ot
 
 // Core, LAN identity and portal hooks.
 assert.ok(coreHeader.includes('bool (*holdAutoConfirm)();'), 'the core must let the cloud agent hold automatic confirmation');
-assert.match(core, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.2\.0"/);
+assert.match(core, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.3\.0"/);
 assert.ok(core.includes('holdAutoConfirm'), 'coreLoop must consult the hold before auto-confirming');
 assert.ok(lanHeader.includes('String (*extraIdentity)();'), 'the LAN identity must be able to carry the cloud status');
 assert.ok(lan.includes('extraIdentity') && lan.includes('\\"cloud\\":'), 'LAN identity appends the cloud object');

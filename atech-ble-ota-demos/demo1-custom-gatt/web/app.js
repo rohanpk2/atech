@@ -121,6 +121,50 @@ function clearGattHandles() {
   identityChar = identityControlChar = identityEventChar = null;
   provStatusChar = provRequestChar = provReplyChar = null;
   if (window.AtechDemo1Transport) window.AtechDemo1Transport.provisioning = null;
+  syncStatusChar = syncChangeChar = null;
+  if (window.AtechDemo1Transport) window.AtechDemo1Transport.sync = null;
+}
+// Board-to-board sync status (shared/AtechSync, service a7ec0300): a status read and a change
+// notification. Commands travel in the Bluetooth setup session (opcode sync); the shared builder
+// card drives both through transport.sync and transport.provisioning.
+let syncStatusChar = null;
+let syncChangeChar = null;
+
+function makeSync() {
+  return {
+    available: () => Boolean(syncStatusChar && isConnected()),
+    readStatus: async () => {
+      const raw = await syncStatusChar.readValue();
+      return AtechSync.parseStatus(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+    },
+    subscribe: handler => {
+      const characteristic = syncChangeChar;
+      if (!characteristic) return () => {};
+      const listener = event => {
+        const value = event.target.value;
+        handler(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+      };
+      characteristic.addEventListener('characteristicvaluechanged', listener);
+      return () => characteristic.removeEventListener('characteristicvaluechanged', listener);
+    },
+  };
+}
+
+async function discoverSync(server, transport) {
+  syncStatusChar = syncChangeChar = null;
+  if (transport) transport.sync = null;
+  try {
+    const service = await server.getPrimaryService(AtechSync.SERVICE);
+    [syncStatusChar, syncChangeChar] = await Promise.all([
+      service.getCharacteristic(AtechSync.STATUS_CHAR),
+      service.getCharacteristic(AtechSync.CHANGE_CHAR),
+    ]);
+    await syncChangeChar.startNotifications();
+    if (transport) transport.sync = makeSync();
+  } catch (error) {
+    syncStatusChar = syncChangeChar = null;
+    log(`No board sync service on this firmware (${error.message}). Flash the current base image to pair two boards.`, 'BROWSER', 'warn');
+  }
 }
 // Wi-Fi setup over Bluetooth (shared/AtechBleProv on the board, web-shared/atech-provision.js
 // here): the shared builder card drives it through transport.provisioning. The characteristics
@@ -370,6 +414,7 @@ async function connectGatt() {
   }
 
   await discoverProvisioning(server, window.AtechDemo1Transport);
+  await discoverSync(server, window.AtechDemo1Transport);
 
   if (!currentIdentity) $('deviceName').textContent = device.name || 'Unnamed ESP32-S3';
   $('firmwareVersion').textContent = currentFirmwareInfo;
@@ -390,7 +435,7 @@ async function selectAndConnect() {
   } else {
     device = await navigator.bluetooth.requestDevice({
       filters: [{namePrefix: 'Atech-Custom-OTA'}],
-      optionalServices: [SERVICE, AtechIdentity.IDENTITY_SERVICE, AtechProvision.SERVICE],
+      optionalServices: [SERVICE, AtechIdentity.IDENTITY_SERVICE, AtechProvision.SERVICE, AtechSync.SERVICE],
     });
     observeDevice(device);
   }
@@ -820,6 +865,7 @@ window.AtechDemo1Transport = {
   deploy: deployBytes,
   control: opcode => sendControl(opcode),
   provisioning: null,   // set on connect when the board has the Wi-Fi setup service
+  sync: null,           // set on connect when the board has the board sync status service
   transferring: () => transferring,
 };
 

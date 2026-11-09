@@ -336,6 +336,7 @@ struct AtechCloudOta::Impl {
     body += F("&heap="); body += String(esp_get_free_internal_heap_size());
     body += F("&heap_min="); body += String(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     body += F("&state="); body += stateText(state);
+    if (config.extraReport) { body += F("&sync="); body += formEncode(config.extraReport()); }
     if (!markerJob.isEmpty() && !bootAcknowledged) {
       body += F("&boot_job="); body += formEncode(markerJob);
       body += F("&boot_build="); body += formEncode(markerBuild);
@@ -586,6 +587,8 @@ struct AtechCloudOta::Impl {
     if (state == State::Error) setState(State::Idle, String());
     const String ack = kvGet(response, "ack");
     if (!ack.isEmpty()) handleAck(ack, kvGet(response, "action"));
+    const String syncCommand = kvGet(response, "sync");
+    if (!syncCommand.isEmpty() && config.command) config.command(syncCommand);
     const String job = kvGet(response, "job");
     if (!job.isEmpty() && ready) runJob(response);
   }

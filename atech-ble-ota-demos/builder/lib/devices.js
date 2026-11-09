@@ -9,7 +9,7 @@ const path = require('node:path');
 const {loadConfig} = require('./config');
 const mdns = require('./mdns');
 const {request} = require('./lan-client');
-const {controlMessage, hmacHex, CONTROL_OPS} = require('./lan-auth');
+const {controlMessage, syncMessage, hmacHex, CONTROL_OPS} = require('./lan-auth');
 
 const DEVICE_ID = /^ATECH-[0-9A-F]{12}$/;
 const PROBE_TIMEOUT_MS = 2500;
@@ -33,6 +33,7 @@ function cloudIdentity(record) {
     build: r.build || record.build || '', app: r.app || '', ver: Number(r.ver || 0), slotSize: Number(r.slotSize || 0), pending: Boolean(r.pending),
     canRollback: false, safe: Boolean(r.safe), appState: r.safe ? 'disabled' : 'running', loops: Number(r.loops || 0), up: Number(r.up || 0),
     otaOwner: r.transferring ? 'cloud' : '', target: '', paired: true, source: 'cloud', heap: Number(r.heap || 0), heapMin: Number(r.heapMin || 0),
+    sync: r.sync || null,
     wifi: {ssid: '', ip: '', rssi: Number(r.rssi || 0), hostname: '', mdns: '', port: 0, connected: true, transferring: Boolean(r.transferring),
            lastTransferError: '', lastTransferMs: 0},
   };
@@ -51,6 +52,7 @@ function summarizeIdentity(identity) {
     app: identity.app, ver: Number(identity.ver || 0), slotSize: Number(identity.slotSize || 0), pending: Boolean(identity.pending),
     canRollback: Boolean(identity.canRollback), safe: Boolean(identity.safe), appState: identity.appState, loops: Number(identity.loops || 0),
     up: Number(identity.up || 0), otaOwner: identity.otaOwner || '', target: identity.target || '', paired: identity.paired !== false,
+    sync: identity.sync && typeof identity.sync === 'object' ? identity.sync : null,
     wifi: {ssid: net.ssid || '', ip: net.ip || '', rssi: Number(net.rssi || 0), hostname: net.hostname || '', mdns: net.mdns || '',
            port: Number(net.port || DEFAULT_PORT), connected: Boolean(net.connected), transferring: Boolean(net.transferring),
            lastTransferError: net.last_transfer_error || '', lastTransferMs: Number(net.last_transfer_ms || 0)},
@@ -252,6 +254,27 @@ class DeviceRegistry {
     }});
     if (response.status === 401) throw new Error('The board rejected the OTA authorization code');
     if (response.status !== 200 || !response.json) throw new Error((response.json && response.json.error) || `Control ${op} failed (HTTP ${response.status})`);
+    return response.json;
+  }
+
+  // Relays a board-to-board sync command (form body) to the board's LAN service, signed with the
+  // pairing token, and returns the board's JSON answer ({ok, code} or {ok: false, error}).
+  async sync(id, form) {
+    const record = this.devices.get(id);
+    if (!record) throw new Error(`Unknown device ${id}`);
+    if (!record.secret) throw new Error(`${id} is not paired`);
+    if (!record.host) throw new Error(`${id} has no known address; find it first`);
+    const host = record.host;
+    const port = record.port || DEFAULT_PORT;
+    const body = String(form);
+    const challenge = await this.challenge({host, port});
+    if (challenge.device && challenge.device !== id) throw new Error(`${host}:${port} is ${challenge.device}, not ${id}`);
+    const auth = hmacHex(record.secret, syncMessage({deviceId: id, nonce: challenge.nonce, body}));
+    const response = await this.deps.request({host, port, method: 'POST', path: '/api/sync', timeoutMs: PROBE_TIMEOUT_MS, body: Buffer.from(body, 'utf8'), headers: {
+      'Content-Type': 'application/x-www-form-urlencoded', 'X-Atech-Device': id, 'X-Atech-Nonce': challenge.nonce, 'X-Atech-Auth': auth,
+    }});
+    if (response.status === 401) throw new Error('The board rejected the OTA authorization code');
+    if (response.status !== 200 || !response.json) throw new Error((response.json && response.json.error) || `Sync command failed (HTTP ${response.status})`);
     return response.json;
   }
 

@@ -113,6 +113,16 @@
 .ai-deploy-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
 .ai-progress { margin-top: 14px; }
 
+/* ---- Board connections (step 1): pairing and the shared demo state ---- */
+.sync { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.sync-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.sync h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.sync .state { margin-top: 0; }
+.sync-facts { margin: 10px 0 0; }
+.sync-code { display: block; width: 100%; margin-top: 12px; font-family: var(--mono); font-size: 12px; }
+.sync-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+.sync-form input { min-width: 0; }
+
 /* ---- Step 3: deployment ---- */
 /* ---- Wi-Fi setup over Bluetooth (step 1) ---- */
 .prov { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
@@ -161,6 +171,7 @@
 
 @media (max-width: 600px) {
   .prov-form { grid-template-columns: minmax(0, 1fr); }
+  .sync-form { grid-template-columns: minmax(0, 1fr); }
   .step { grid-template-columns: 26px minmax(0, 1fr); gap: 12px; }
   .step::before { left: 12.5px; top: 44px; }
   .step-marker { width: 26px; height: 26px; margin-top: 14px; font-size: 12px; }

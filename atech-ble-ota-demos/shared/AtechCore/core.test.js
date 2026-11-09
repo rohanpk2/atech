@@ -45,7 +45,7 @@ assert.ok(table, 'AtechCore.cpp must define ALLOWED_PINS[]');
 const pins = table[1].split(',').map(value => Number(value.trim())).filter(Number.isFinite);
 assert.deepEqual(pins, [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47]);
 
-assert.match(impl, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.2\.0"/);
+assert.match(impl, /ATECH_CORE_VERSION\[\]\s*=\s*"1\.3\.0"/);
 assert.match(core, /bool \(\*holdAutoConfirm\)\(\);/, 'the cloud agent must be able to hold automatic confirmation');
 for (const key of ['id', 'suffix', 'demo', 'build', 'app', 'ver', 'slot', 'slotSize', 'pending',
                    'canRollback', 'safe', 'crashes', 'target', 'paired', 'appState', 'otaOwner', 'loops', 'up']) {

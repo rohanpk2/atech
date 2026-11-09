@@ -27,6 +27,11 @@ struct AtechCloudOtaConfig {
   bool (*otherOtaBusy)();
   // True while the station interface has an IP address.
   bool (*wifiConnected)();
+  // Optional: board-to-board sync. extraReport() is sent with every poll as sync=<JSON>; a
+  // sync=<form> line in the poll answer is handed to command() (the backend relays the owner's
+  // dashboard, so it runs privileged).
+  String (*extraReport)();
+  void (*command)(const String &form);
 };
 
 class AtechCloudOta {

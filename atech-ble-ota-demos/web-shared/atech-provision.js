@@ -17,13 +17,15 @@
 //             (0x83 / 0x84) is encrypted the same way with its own opcode as AAD. The plaintext
 //             on both sides is a form body (key=value&..., percent-encoded, booleans as 1/0):
 //             the board already speaks that format and needs no JSON parser.
+//   sync    : opcode 5, sealed like provision; body op=code|pair|unpair|set|toggle|event (+ key, value,
+//             type, code, name, payload, grant); reply ok=1[&code=...] or ok=0&error=... (board sync)
 //   error   : opcode 0xFF, body = UTF-8 text (only for requests that cannot be answered in a session)
 (function attachAtechProvision(root) {
   const SERVICE = 'a7ec0200-2e47-4dd2-82a4-9c2cf6eaa001';
   const STATUS_CHAR = 'a7ec0201-2e47-4dd2-82a4-9c2cf6eaa001';
   const REQUEST_CHAR = 'a7ec0202-2e47-4dd2-82a4-9c2cf6eaa001';
   const REPLY_CHAR = 'a7ec0203-2e47-4dd2-82a4-9c2cf6eaa001';
-  const OPS = Object.freeze({hello: 1, scan: 2, provision: 3, forget: 4});
+  const OPS = Object.freeze({hello: 1, scan: 2, provision: 3, forget: 4, sync: 5});
   const REPLY_BIT = 0x80;
   const ERROR_OP = 0xff;
   const FLAG_LAST = 0x01;
@@ -219,6 +221,7 @@
       const result = {ok: out.ok === '1'};
       if (out.joining !== undefined) result.joining = out.joining === '1';
       if (out.token) result.token = out.token;
+      if (out.code) result.code = out.code;
       if (out.error) result.error = out.error;
       return result;
     }
@@ -253,6 +256,8 @@
     function provision(payload) { return sealedRequest(OPS.provision, payload || {}); }
     // {wifi, url, grant}
     function forget(payload) { return sealedRequest(OPS.forget, payload || {}); }
+    // {op, key, value, type, code, name, payload, grant}: board-to-board sync (shared/AtechSync)
+    function sync(payload) { return sealedRequest(OPS.sync, payload || {}); }
 
     function close() {
       try { unsubscribe(); } catch (_) { /* ignore */ }
@@ -261,7 +266,7 @@
       session = null;
     }
 
-    return {hello, scan, provision, forget, close, hasKey: () => Boolean(aesKey), current: () => session};
+    return {hello, scan, provision, forget, sync, close, hasKey: () => Boolean(aesKey), current: () => session};
   }
 
   const api = Object.freeze({

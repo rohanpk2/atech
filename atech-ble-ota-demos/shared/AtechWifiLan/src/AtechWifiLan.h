@@ -23,6 +23,11 @@ struct AtechWifiLanConfig {
   bool (*otherOtaBusy)();
   // Optional: a JSON object appended to /api/identity as "cloud" (the cloud OTA agent's status).
   String (*extraIdentity)();
+  // Optional: board-to-board sync. POST /api/sync (HMAC "atech-sync/1" with the pairing token)
+  // hands the form body to syncCommand and answers its JSON; syncIdentity is appended to
+  // /api/identity as "sync".
+  String (*syncCommand)(const String &form);
+  String (*syncIdentity)();
 };
 
 class AtechWifiLan {
@@ -60,6 +65,10 @@ public:
   // Wi-Fi mode arbitration with the hotspot portal: AP + STA when both are
   // wanted, STA only otherwise, off when nothing is wanted.
   void setSoftApActive(bool active);
+  // ESP-NOW (AtechSync) needs the Wi-Fi driver started even without credentials: while held,
+  // the mode is never OFF (station mode, not connecting).
+  void setRadioHold(bool hold);
+  bool radioHeld() const;
 
   // True while an authenticated LAN upload session owns flash.
   bool isTransferring() const;

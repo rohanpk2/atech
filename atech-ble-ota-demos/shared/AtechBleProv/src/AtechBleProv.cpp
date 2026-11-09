@@ -4,6 +4,7 @@
 
 #include <AtechCloudOta.h>
 #include <AtechCore.h>
+#include <AtechSync.h>
 #include <AtechWifiLan.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -51,6 +52,7 @@ constexpr uint8_t OP_HELLO = 0x01;
 constexpr uint8_t OP_SCAN = 0x02;
 constexpr uint8_t OP_PROVISION = 0x03;
 constexpr uint8_t OP_FORGET = 0x04;
+constexpr uint8_t OP_SYNC = 0x05;
 constexpr uint8_t REPLY_BIT = 0x80;
 constexpr uint8_t OP_ERROR = 0xff;
 constexpr size_t SCAN_LIMIT = 12;
@@ -430,6 +432,31 @@ struct AtechBleProv::Impl {
     sendSealed(replyOp, F("ok=1"));
   }
 
+  // Board-to-board sync over the sealed session: op=code|pair|unpair|set|toggle|event (see
+  // AtechSync::command). Issuing a code, pairing and unpairing change persistent configuration and
+  // need the same authorization as a Wi-Fi change on an owned board; setting state does not.
+  void sync(const uint8_t *body, size_t length) {
+    String plain, why;
+    if (!unseal(OP_SYNC, body, length, plain, why)) { sendError(why); return; }
+    const uint8_t replyOp = OP_SYNC | REPLY_BIT;
+    String op, grant;
+    formGet(plain, "op", op);
+    formGet(plain, "grant", grant);
+    const bool privileged = authorized(grant);
+    const bool pairingOp = op == "code" || op == "pair" || op == "unpair";
+    if (pairingOp && !privileged) {
+      refuse(replyOp, F("This board is locked: it already has an owner. Ask the owner's dashboard for a grant or press the BOOT button once"));
+      return;
+    }
+    if (!config.sync) { refuse(replyOp, F("This image has no board-to-board sync")); return; }
+    const AtechSyncResult result = config.sync->command(plain, privileged);
+    plain = "";
+    if (!result.ok) { refuse(replyOp, result.error); return; }
+    String reply = F("ok=1");
+    if (!result.code.isEmpty()) { reply += F("&code="); reply += formEncode(result.code); }
+    sendSealed(replyOp, reply);
+  }
+
   void handle() {
     if (size == 0) return;
     const uint8_t opcode = message[0];
@@ -441,6 +468,7 @@ struct AtechBleProv::Impl {
       case OP_SCAN: scan(); break;
       case OP_PROVISION: provision(body, length); break;
       case OP_FORGET: forget(body, length); break;
+      case OP_SYNC: sync(body, length); break;
       default: sendError(String(F("Unknown request ")) + String(opcode)); break;
     }
   }
