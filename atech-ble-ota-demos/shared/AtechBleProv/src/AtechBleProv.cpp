@@ -36,7 +36,7 @@ constexpr char REPLY_UUID[] = "a7ec0203-2e47-4dd2-82a4-9c2cf6eaa001";
 constexpr char HKDF_INFO[] = "atech-prov/1";
 constexpr char GRANT_PREFIX[] = "atech-prov-grant/1\n";
 constexpr size_t MAX_FRAGMENT = 240;
-constexpr size_t MAX_MESSAGE = 1024;
+constexpr size_t MAX_MESSAGE = 6144;   // an enterprise profile with a CA chain and a client certificate fits
 constexpr size_t FRAME_MAX = MAX_FRAGMENT + 2;
 constexpr uint32_t FRAGMENT_TIMEOUT_MS = 5000;
 constexpr size_t PROV_NONCE_BYTES = 16;
@@ -376,22 +376,33 @@ struct AtechBleProv::Impl {
     String plain, why;
     if (!unseal(OP_PROVISION, body, length, plain, why)) { sendError(why); return; }
     const uint8_t replyOp = OP_PROVISION | REPLY_BIT;
-    String ssid, secret, url, grant, claim;
-    const bool hasSsid = formGet(plain, "ssid", ssid);
-    formGet(plain, "pass", secret);
+    AtechWifiProfile profile;
+    String url, grant, claim, hotspot, authText, phase2Text, caBundle;
+    const bool hasSsid = formGet(plain, "ssid", profile.ssid);
+    formGet(plain, "pass", profile.pass);
+    formGet(plain, "auth", authText);
+    formGet(plain, "ident", profile.identity);
+    formGet(plain, "user", profile.username);
+    formGet(plain, "ca", profile.ca);
+    formGet(plain, "crt", profile.cert);
+    formGet(plain, "key", profile.key);
+    formGet(plain, "ph2", phase2Text);
+    formGet(plain, "domain", profile.domain);
+    formGet(plain, "ca_bundle", caBundle);
     const bool hasUrl = formGet(plain, "url", url);
     formGet(plain, "grant", grant);
     const bool wantToken = formGet(plain, "claim", claim) && claim == "1";
+    const bool wantHotspot = formGet(plain, "hotspot", hotspot) && hotspot == "1";
     plain = "";
+    profile.caBundle = caBundle == "1";
     if (!authorized(grant)) {
       refuse(replyOp, F("This board is locked: it already has an owner. Ask the owner's dashboard for a grant or press the BOOT button once"));
       return;
     }
     if (config.busy && config.busy()) { refuse(replyOp, F("The board is busy with an update; try again when it is done")); return; }
-    if (hasSsid && (ssid.isEmpty() || ssid.length() > 32)) { refuse(replyOp, F("SSID must contain 1 to 32 characters")); return; }
-    if (hasSsid && !secret.isEmpty() && (secret.length() < 8 || secret.length() > 63)) {
-      refuse(replyOp, F("Wi-Fi password must contain 8 to 63 characters (or be empty for an open network)"));
-      return;
+    if (hasSsid) {
+      if (!AtechWifiLan::parseAuth(authText, profile.auth)) { refuse(replyOp, F("Unknown Wi-Fi security method")); return; }
+      if (!AtechWifiLan::parsePhase2(phase2Text, profile.phase2)) { refuse(replyOp, F("Unknown TTLS phase 2 method")); return; }
     }
     if (hasUrl) {
       url.trim();
@@ -404,14 +415,16 @@ struct AtechBleProv::Impl {
       }
     }
     if (hasSsid) {
-      if (!config.lan || !config.lan->saveCredentials(ssid, secret)) { refuse(replyOp, config.lan ? config.lan->lastError() : String(F("No Wi-Fi manager"))); return; }
-      Serial.printf("[prov] Wi-Fi credentials for \"%s\" stored over Bluetooth; joining\n", ssid.c_str());
+      if (!config.lan || !config.lan->saveProfile(profile)) { refuse(replyOp, config.lan ? config.lan->lastError() : String(F("No Wi-Fi manager"))); return; }
+      Serial.printf("[prov] Wi-Fi profile for \"%s\" (%s) stored over Bluetooth; joining\n", profile.ssid.c_str(), AtechWifiLan::authName(profile.auth));
     }
-    secret = "";
+    profile = AtechWifiProfile();
     String reply = F("ok=1&joining=");
     reply += hasSsid ? '1' : '0';
     if (wantToken && config.authToken) { reply += F("&token="); reply += formEncode(config.authToken()); }
-    Serial.printf("[prov] provisioning accepted%s%s\n", hasUrl ? " (server URL)" : "", wantToken ? " (pairing token released to the dashboard)" : "");
+    if (wantHotspot && config.hotspotReport) { const String report = config.hotspotReport(); if (!report.isEmpty()) { reply += '&'; reply += report; } }
+    Serial.printf("[prov] provisioning accepted%s%s%s\n", hasUrl ? " (server URL)" : "", wantToken ? " (pairing token released to the dashboard)" : "",
+                  wantHotspot ? " (hotspot credentials released to the dashboard)" : "");
     sendSealed(replyOp, reply);
   }
 
@@ -501,10 +514,15 @@ struct AtechBleProv::Impl {
     json += F(",\"session\":"); json += haveKey ? F("true") : F("false");
     json += F(",\"wifi\":{\"configured\":"); json += lan && lan->hasCredentials() ? F("true") : F("false");
     json += F(",\"ssid\":\""); json += jsonEscape(lan ? lan->configuredSsid() : String());
+    json += F("\",\"auth\":\""); json += lan ? lan->authName() : "personal";
     json += F("\",\"connected\":"); json += connected ? F("true") : F("false");
     json += F(",\"ip\":\""); json += connected ? lan->ip().toString() : String();
     json += F("\",\"rssi\":"); json += String(connected ? lan->rssi() : 0);
     json += F(",\"reason\":"); json += String(lan ? lan->lastDisconnectReason() : 0);
+    json += F(",\"internet\":\""); json += lan ? lan->internetState() : "unknown";
+    json += F("\",\"captive_url\":\""); json += jsonEscape(lan ? lan->captiveUrl() : String());
+    json += F("\",\"mac\":\""); json += lan ? lan->stationMac() : String();
+    json += '"';
     json += F(",\"joining\":"); json += lan && lan->stationEnabled() && !connected ? F("true") : F("false");
     json += F("},\"cloud\":{\"url\":\""); json += jsonEscape(cloud ? cloud->serverUrl() : String());
     json += F("\",\"state\":\""); json += cloud ? cloud->stateName() : "disabled";

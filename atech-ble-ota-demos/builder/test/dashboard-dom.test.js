@@ -84,10 +84,9 @@ for (const demo of [1, 2]) {
     assert.deepEqual(errors, []);
     assert.equal(doc.body.dataset.deployMethod, 'hotspot', 'no board reachable yet: hotspot instructions are shown');
     assert.equal(doc.getElementById('aiBrowserNote').hidden, false);
-    assert.match(doc.getElementById('aiBrowserNote').textContent, /pairing and upload are manual/);
+    assert.match(doc.getElementById('aiBrowserNote').textContent, /board's own page|board's page/i);
     assert.match(doc.getElementById('aiBrowserNote').textContent, /Wi-Fi deployment works in Safari and Chrome/);
     assert.equal(doc.getElementById('connect').disabled, true);
-    assert.match(doc.getElementById('methodBleNote').textContent, /No Web Bluetooth/);
     assert.equal(doc.getElementById('devFind').disabled, false);
   });
 }
@@ -107,8 +106,8 @@ test('the builder card renders a ready job and refuses to deploy a mismatched de
   assert.equal(doc.getElementById('aiCode').textContent, 'void appLoop() {}');
   assert.equal(doc.getElementById('aiDownload').hidden, false);
   assert.match(doc.getElementById('aiDownload').getAttribute('href'), /\/api\/builds\/abc\/firmware\.bin/);
-  assert.equal(doc.getElementById('aiDeploy').disabled, false, 'with no board reachable the button downloads for the hotspot');
-  assert.match(doc.getElementById('aiDeploy').textContent, /Download firmware for the hotspot portal/);
+  assert.equal(doc.getElementById('aiDeploy').disabled, false, 'with no board reachable the local update is still possible');
+  assert.match(doc.getElementById('aiDeploy').textContent, /local Wi-Fi update/i);
   // A Demo 1 board connected over Bluetooth cannot receive a Demo 2 build.
   const transport = window.AtechDemo1Transport;
   transport.isConnected = () => true;
@@ -116,7 +115,7 @@ test('the builder card renders a ready job and refuses to deploy a mismatched de
                                pending: false, canRollback: false, safe: false, paired: true, appState: 'running', loops: 1, up: 1});
   window.AtechBuilder; doc.getElementById('aiPrompt').dispatchEvent(new window.Event('input'));
   await new Promise(resolve => setTimeout(resolve, 10));
-  doc.getElementById('methodBle').click();
-  assert.equal(doc.getElementById('aiDeploy').disabled, true, 'demo mismatch blocks the deploy');
+  doc.getElementById('methodHotspot').click();
+  assert.equal(doc.getElementById('aiDeploy').disabled, true, 'demo mismatch blocks the deploy even for the local update');
   assert.match(doc.getElementById('aiDeploy').title, /for Demo 2/);
 });

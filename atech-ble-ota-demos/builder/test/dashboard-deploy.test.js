@@ -119,23 +119,23 @@ test('a paired, reachable board makes Wi-Fi the automatic method and Deploy post
   assert.equal(window.AtechBuilder, window.AtechBuilder);
 });
 
-test('without a reachable board, a connected Bluetooth board is the backup and Safari gets honest copy', async () => {
+test('without a reachable board, a connected Bluetooth board is not a firmware transport: the local update is offered', async () => {
   const withBle = await bootDashboard(1, {connected: true});
-  assert.equal(withBle.doc.body.dataset.deployMethod, 'ble');
-  assert.match(withBle.doc.getElementById('methodBleNote').textContent, /connected over/);
+  assert.equal(withBle.doc.body.dataset.deployMethod, 'hotspot', 'Bluetooth never carries firmware');
+  assert.equal(withBle.doc.getElementById('methodBle'), null, 'no Bluetooth transport card');
   assert.match(withBle.doc.getElementById('devBle').textContent, /Connected/);
+  assert.match(withBle.doc.getElementById('methodHotspotNote').textContent, /board's page|board's own/i);
   const safari = await bootDashboard(1, {bluetooth: false});
   assert.equal(safari.doc.body.dataset.deployMethod, 'hotspot');
   assert.equal(safari.doc.getElementById('aiBrowserNote').hidden, false);
   assert.match(safari.doc.getElementById('aiBrowserNote').textContent, /Wi-Fi deployment works in Safari and Chrome/);
-  assert.match(safari.doc.getElementById('methodBleNote').textContent, /No Web Bluetooth/);
   assert.equal(safari.doc.getElementById('connect').disabled, true);
   const safariWifi = await bootDashboard(1, {bluetooth: false, routes: {'/api/devices': {devices: [{id: BOARD, demo: 1, paired: true, online: true, identity: identity()}]}}});
   assert.equal(safariWifi.doc.body.dataset.deployMethod, 'wifi', 'Safari deploys over Wi-Fi without Web Bluetooth');
   assert.equal(safariWifi.doc.getElementById('aiBrowserNote').hidden, true);
 });
 
-test('a failed Wi-Fi deployment is reported and offers Bluetooth instead of switching silently', async () => {
+test('a failed Wi-Fi deployment is reported and offers the local update instead of switching silently', async () => {
   const device = {id: BOARD, suffix: 'D4E5F6', demo: 1, paired: true, online: true, identity: identity()};
   const calls = [];
   const failed = {id: 'dep2', state: 'failed', stage: 'Failed', total: 1000, acked: 300, percent: 30, speedBps: 1000, etaMs: null, timings: {},
@@ -150,12 +150,13 @@ test('a failed Wi-Fi deployment is reported and offers Bluetooth instead of swit
   doc.getElementById('aiDeploy').click();
   await new Promise(resolve => setTimeout(resolve, 2300));
   assert.match(doc.getElementById('deployStatus').textContent, /Wi-Fi deployment not verified: The board closed the connection/);
-  assert.match(doc.getElementById('deployStatus').textContent, /Bluetooth is available: choose it above and click Deploy again/);
-  assert.equal(calls.filter(c => c.url === '/api/builds/job1/firmware.bin').length, 0, 'no Bluetooth transfer was started automatically');
+  assert.match(doc.getElementById('deployStatus').textContent, /local Wi-Fi update is available: choose it above and click Deploy again/i);
+  assert.equal(calls.filter(c => c.url === '/api/builds/job1/package').length, 0, 'no local update was started automatically');
+  assert.equal(calls.filter(c => c.url === '/api/builds/job1/firmware.bin').length, 0, 'nothing is transferred over Bluetooth');
   assert.equal(doc.body.dataset.deployMethod, 'wifi', 'the automatic choice stays Wi-Fi until the user picks another method');
-  doc.getElementById('methodBle').click();
-  assert.equal(doc.body.dataset.deployMethod, 'ble');
-  assert.match(doc.getElementById('aiDeploy').textContent, /Deploy over Bluetooth/);
+  doc.getElementById('methodHotspot').click();
+  assert.equal(doc.body.dataset.deployMethod, 'hotspot');
+  assert.match(doc.getElementById('aiDeploy').textContent, /local Wi-Fi update/i);
 });
 
 test('deploy is blocked when the build is bound to a different board or demo', async () => {
@@ -195,4 +196,52 @@ test('the dashboard adopts a ?key= link and shows a banner when the backend dema
   assert.equal(window.localStorage.getItem('atechBuilderKey'), 'abc123');
   assert.equal(window.location.search, '', 'the key is stripped from the address bar');
   assert.equal(window.document.getElementById('keyBanner').hidden, false);
+});
+
+test('a LAN board that has run a higher version asks before a downgrade and then sends allowDowngrade', async () => {
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const device = {id: BOARD, suffix: 'D4E5F6', demo: 1, paired: true, online: true, identity: identity({ver: 5, maxVersion: 7})};
+  const calls = [];
+  const verified = {id: 'dep1', state: 'verified', stage: 'Verified', total: 1000, acked: 1000, percent: 100, speedBps: 500000, etaMs: 0,
+                    timings: {transferMs: 2, rebootMs: 3, verifyMs: 4, totalMs: 9}, checks: ['build deadbeef running'], deviceId: BOARD, error: null};
+  const {doc} = await bootDashboard(1, {calls, routes: {
+    '/api/devices': {devices: [device]}, '/api/builds': {id: 'job1', buildId: 'deadbeef', appVersion: 3}, '/api/builds/job1': readyJob(),
+    '/api/builds/job1/deploy': {status: 202, body: {id: 'dep1'}}, '/api/deployments/dep1': verified,
+  }});
+  doc.getElementById('aiPrompt').value = 'Blink';
+  doc.getElementById('aiBuild').click();
+  await pause(40);
+  doc.getElementById('aiDeploy').click();
+  await pause(40);
+  assert.match(doc.getElementById('deployStatus').textContent, /version 3 .*version 7.*older version/);
+  assert.equal(calls.filter(c => c.url === '/api/builds/job1/deploy').length, 0, 'nothing is deployed before the confirmation');
+  doc.getElementById('aiDeploy').click();
+  await pause(2300);
+  assert.deepEqual(calls.find(c => c.url === '/api/builds/job1/deploy').body, {deviceId: BOARD, allowDowngrade: true});
+  assert.match(doc.getElementById('deployBadge').textContent, /Verified/);
+});
+
+test('a board that refuses a downgrade the dashboard could not foresee arms the confirmation for the next click', async () => {
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const device = {id: BOARD, suffix: 'D4E5F6', demo: 1, paired: true, online: true, identity: identity()};
+  const calls = [];
+  const refused = {id: 'dep2', state: 'failed', stage: 'Failed', total: 1000, acked: 0, percent: 0, speedBps: 0, etaMs: null, timings: {}, checks: [], deviceId: BOARD,
+                   error: 'Downgrade refused: this board has run app version 7 and this build is version 3; allow the downgrade in the dashboard to install it'};
+  const {doc} = await bootDashboard(1, {calls, routes: {
+    '/api/devices': {devices: [device]}, '/api/builds': {id: 'job1', buildId: 'deadbeef', appVersion: 3}, '/api/builds/job1': readyJob(),
+    '/api/builds/job1/deploy': {status: 202, body: {id: 'dep2'}}, '/api/deployments/dep2': refused,
+  }});
+  doc.getElementById('aiPrompt').value = 'Blink';
+  doc.getElementById('aiBuild').click();
+  await pause(40);
+  doc.getElementById('aiDeploy').click();
+  await pause(2300);
+  assert.match(doc.getElementById('deployStatus').textContent, /Downgrade refused/);
+  assert.match(doc.getElementById('deployStatus').textContent, /click Deploy again to allow/i);
+  assert.deepEqual(calls.filter(c => c.url === '/api/builds/job1/deploy')[0].body, {deviceId: BOARD});
+  doc.getElementById('aiDeploy').click();
+  await pause(2300);
+  const deploys = calls.filter(c => c.url === '/api/builds/job1/deploy');
+  assert.equal(deploys.length, 2);
+  assert.deepEqual(deploys[1].body, {deviceId: BOARD, allowDowngrade: true});
 });

@@ -5,6 +5,7 @@
 #include "AtechImageSink.h"
 
 #include <AtechCore.h>
+#include <AtechFwSign.h>
 #include <HTTPClient.h>
 #include <NetworkClient.h>
 #include <NetworkClientSecure.h>
@@ -31,6 +32,8 @@ constexpr uint32_t LOOP_DELAY_MS = 250;
 constexpr uint32_t BACKOFF_MIN_MS = 5000;
 constexpr uint32_t BACKOFF_MAX_MS = 120000;
 constexpr uint32_t UNCLAIMED_BACKOFF_MS = 30000;
+constexpr uint32_t CAPTIVE_RETRY_MS = 60000;
+constexpr uint8_t MAX_POLL_FAILURES = 3;   // failed polls in a row that end the session (the agent logs in again)
 constexpr uint32_t CONNECT_TIMEOUT_MS = 10000;
 constexpr uint32_t READ_TIMEOUT_MS = 15000;
 constexpr uint32_t HANDSHAKE_TIMEOUT_S = 30;
@@ -41,12 +44,13 @@ constexpr size_t MAX_URL_LENGTH = 120;
 constexpr uint8_t MAX_TRANSPORT_FAILURES = 5;
 constexpr TickType_t LOCK_WAIT = pdMS_TO_TICKS(200);
 
-enum class State : uint8_t { Disabled, WaitingWifi, Unclaimed, Idle, Downloading, Installing, Rebooting, Confirming, Error };
+enum class State : uint8_t { Disabled, WaitingWifi, Captive, Unclaimed, Idle, Downloading, Installing, Rebooting, Confirming, Error };
 
 const char *stateText(State state) {
   switch (state) {
     case State::Disabled: return "disabled";
     case State::WaitingWifi: return "waiting_wifi";
+    case State::Captive: return "captive";
     case State::Unclaimed: return "unclaimed";
     case State::Idle: return "idle";
     case State::Downloading: return "downloading";
@@ -165,6 +169,7 @@ struct AtechCloudOta::Impl {
   uint32_t lastLoginAttemptMs = 0;
   uint32_t lastContactMs = 0;
   uint32_t loginFailures = 0;
+  uint8_t pollFailures = 0;
 
   // Boot marker: the job the previous boot installed, persisted before the restart.
   String markerJob;
@@ -172,6 +177,7 @@ struct AtechCloudOta::Impl {
   String doneJob;
   volatile bool holdConfirm = false;
   bool bootAcknowledged = false;
+  bool versionRecorded = false;   // the running image's version is recorded once it is confirmed
   uint32_t bootMs = 0;
 
   // Active job.
@@ -336,6 +342,11 @@ struct AtechCloudOta::Impl {
     body += F("&heap="); body += String(esp_get_free_internal_heap_size());
     body += F("&heap_min="); body += String(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     body += F("&state="); body += stateText(state);
+    body += F("&internet="); body += config.internetState ? config.internetState() : "unknown";
+    body += F("&kid="); body += atech::fwsign::keyIdHex();
+    body += F("&max_ver="); body += String(atech::fwsign::maxVersion());
+    body += F("&mac="); body += formEncode(WiFi.macAddress());
+    if (config.extraPoll) { const String extra = config.extraPoll(); if (!extra.isEmpty()) { body += '&'; body += extra; } }
     if (config.extraReport) { body += F("&sync="); body += formEncode(config.extraReport()); }
     if (!markerJob.isEmpty() && !bootAcknowledged) {
       body += F("&boot_job="); body += formEncode(markerJob);
@@ -364,10 +375,16 @@ struct AtechCloudOta::Impl {
     body += "&nonce="; body += nonceLower;
     body += "&proof="; body += proof;
     body += '&'; body += identityFields();
+    if (config.extraLogin) { const String extra = config.extraLogin(); if (!extra.isEmpty()) { body += '&'; body += extra; } }
     setSession(String());
     status = exchange("POST", String("/api/device/login"), body, response);
     if (status == 200 && kvGet(response, "session").length() == 48) {
       setSession(kvGet(response, "session"));
+      // The server's firmware signing key: pinned at the first authenticated contact, never replaced here.
+      const String signKey = kvGet(response, "sign_key");
+      if (!signKey.isEmpty() && !atech::fwsign::keyMatches(signKey) && !atech::fwsign::pinKey(signKey, "cloud")) {
+        Serial.println(F("[cloud] the server signs firmware with a key this board does not trust; deployments are refused until the key is updated on the hotspot page"));
+      }
       const uint32_t poll = kvGet(response, "poll").toInt();
       if (poll >= 1000 && poll <= 600000) pollMs = poll;
       loginFailures = 0;
@@ -471,10 +488,26 @@ struct AtechCloudOta::Impl {
     const uint32_t demo = static_cast<uint32_t>(kvGet(response, "demo").toInt());
     uint32_t chunk = static_cast<uint32_t>(kvGet(response, "chunk").toInt());
     if (chunk < 4096 || chunk > 1024 * 1024) chunk = config.chunkBytes;
+    // The signed manifest: build, demo, size, digest, app version, downgrade flag and the board it is for.
+    atech::fwsign::Manifest manifest;
+    manifest.build = build;
+    manifest.demo = config.demo;
+    manifest.size = total;
+    manifest.sha256 = sha;
+    manifest.version = static_cast<uint32_t>(kvGet(response, "ver").toInt());
+    manifest.downgrade = kvGet(response, "dg") == "1";
+    manifest.target = kvGet(response, "target");
+    manifest.signature = kvGet(response, "sig");
+    const String kid = kvGet(response, "kid");
     jobStartedMs = millis();
     if (demo != config.demo) { report(job, "failed", 0, total, "Job is for Demo " + String(demo) + "; this board is Demo " + String(config.demo)); return; }
     if (job == doneJob) { report(job, "failed", 0, total, F("Job already applied on this board")); return; }
     if (!path.startsWith("/api/device/jobs/")) { report(job, "failed", 0, total, F("Job carried no download path")); return; }
+    if (!manifest.target.isEmpty() && manifest.target != atech::deviceId()) { report(job, "failed", 0, total, "Image was signed for " + manifest.target + ", not this board"); return; }
+    if (!kid.isEmpty() && atech::fwsign::hasKey() && kid != atech::fwsign::keyIdHex()) {
+      report(job, "failed", 0, total, "The server signs with key " + kid + " but this board trusts " + atech::fwsign::keyIdHex() + "; update the key on the hotspot page");
+      return;
+    }
     if (config.otherOtaBusy && config.otherOtaBusy()) return;   // the backend offers it again on the next poll
     if (!atech::coreTryAcquireOta("cloud")) return;
     transferring = true;
@@ -484,8 +517,14 @@ struct AtechCloudOta::Impl {
     atech::coreSuspendApp();
     setState(State::Downloading, String());
     String reason;
-    if (!sink.begin(total, sha, build, imageIdentity, reason)) { failJob(job, reason, total); return; }
-    Serial.printf("[cloud] job %s: %lu bytes of build %s into %s\n", job.c_str(), static_cast<unsigned long>(total), build.c_str(), sink.partitionLabel());
+    auto arm = [&](String &why) {
+      if (!sink.begin(total, sha, build, imageIdentity, why)) return false;
+      sink.setManifest(manifest);
+      return true;
+    };
+    if (!arm(reason)) { failJob(job, reason, total); return; }
+    Serial.printf("[cloud] job %s: %lu bytes of build %s v%lu into %s (%s)\n", job.c_str(), static_cast<unsigned long>(total), build.c_str(),
+                  static_cast<unsigned long>(manifest.version), sink.partitionLabel(), manifest.signature.isEmpty() ? "unsigned" : "signed");
     uint8_t failures = 0;
     report(job, "downloading", 0, total);
     while (sink.received() < total) {
@@ -496,7 +535,7 @@ struct AtechCloudOta::Impl {
       if (result == ChunkResult::Restart || result == ChunkResult::Retry) {
         if (++failures > MAX_TRANSPORT_FAILURES) { failJob(job, "download failed after " + String(failures) + " attempts: " + reason, total); return; }
         Serial.printf("[cloud] download interrupted at %lu bytes (%s); retrying\n", static_cast<unsigned long>(offset), reason.c_str());
-        if (result == ChunkResult::Restart && !sink.begin(total, sha, build, imageIdentity, reason)) { failJob(job, reason, total); return; }
+        if (result == ChunkResult::Restart && !arm(reason)) { failJob(job, reason, total); return; }
         vTaskDelay(pdMS_TO_TICKS(500u * failures));
         if (session.isEmpty() && !login()) continue;
         continue;
@@ -580,8 +619,16 @@ struct AtechCloudOta::Impl {
     if (status != 200) {
       if (status > 0 && status != 401) setState(State::Error, "poll answered HTTP " + String(status));
       else if (status <= 0) setState(State::Error, HTTPClient::errorToString(status));
+      // A session that stopped answering is not "online": after three misses the agent drops it (the
+      // hotspot controller then sees the board as offline) and asks the Wi-Fi layer to re-probe.
+      if (status != 401 && ++pollFailures >= MAX_POLL_FAILURES) {
+        pollFailures = 0;
+        setSession(String());
+        if (config.internetRecheck) config.internetRecheck();
+      }
       return;
     }
+    pollFailures = 0;
     const uint32_t poll = kvGet(response, "poll").toInt();
     if (poll >= 1000 && poll <= 600000) pollMs = poll;
     if (state == State::Error) setState(State::Idle, String());
@@ -600,6 +647,8 @@ struct AtechCloudOta::Impl {
   void run() {
     for (;;) {
       checkConfirmTimeout();   // first: a cloud image that cannot reach the cloud rolls back even without Wi-Fi
+      // Once the running image is confirmed (by any path) its app version is the floor for the downgrade rule.
+      if (!versionRecorded && !atech::rollbackPending() && !holdConfirm) { atech::fwsign::recordRunningVersion(config.appVersion); versionRecorded = true; }
       applyPendingConfig();
       if (!enabled()) { if (state != State::Disabled) setState(State::Disabled, String()); vTaskDelay(pdMS_TO_TICKS(1000)); continue; }
       if (!config.wifiConnected || !config.wifiConnected()) {
@@ -608,13 +657,18 @@ struct AtechCloudOta::Impl {
         continue;
       }
       const uint32_t now = millis();
+      // A network with a sign-in page: say so, and try only once a minute (the attempt itself proves nothing).
+      const bool captive = config.internetState && strcmp(config.internetState(), "captive") == 0;
       if (session.isEmpty()) {
-        if (lastLoginAttemptMs == 0 || now - lastLoginAttemptMs >= backoffMs) {
+        if (captive && state != State::Captive && state != State::Unclaimed) setState(State::Captive, F("this network needs a sign-in (captive portal) before the board can reach the build service"));
+        const uint32_t wait = captive ? std::max(backoffMs, CAPTIVE_RETRY_MS) : backoffMs;
+        if (lastLoginAttemptMs == 0 || now - lastLoginAttemptMs >= wait) {
           lastLoginAttemptMs = now;
           if (login()) { backoffMs = BACKOFF_MIN_MS; nextPollAt = now; }
           else {
             loginFailures++;
             backoffMs = state == State::Unclaimed ? UNCLAIMED_BACKOFF_MS : std::min(BACKOFF_MAX_MS, BACKOFF_MIN_MS << std::min<uint32_t>(loginFailures, 5));
+            if (captive && state == State::Error) setState(State::Captive, F("this network needs a sign-in (captive portal) before the board can reach the build service"));
           }
         }
         vTaskDelay(pdMS_TO_TICKS(LOOP_DELAY_MS));
@@ -685,6 +739,11 @@ void AtechCloudOta::loop() {}
 bool AtechCloudOta::isEnabled() const { return _impl && _impl->initialized && _impl->enabled(); }
 bool AtechCloudOta::isTransferring() const { return _impl && _impl->transferring; }
 bool AtechCloudOta::holdsConfirm() const { return _impl && _impl->holdConfirm; }
+uint32_t AtechCloudOta::lastContactAgeMs() const {
+  if (!_impl || _impl->lastContactMs == 0) return 0xFFFFFFFFu;
+  return millis() - _impl->lastContactMs;
+}
+
 bool AtechCloudOta::hasSession() const {
   if (!_impl) return false;
   const bool locked = _impl->take();

@@ -7,7 +7,7 @@ const {loadConfig} = require('../lib/config');
 
 function tempConfig(overrides = {}) {
   const buildsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atech-jobs-'));
-  return {...loadConfig({}), buildsDir, maxRepairs: 3, ...overrides};
+  return {...loadConfig({}), buildsDir, signingKeyFile: path.join(buildsDir, 'signing', 'firmware-signing.pem'), maxRepairs: 3, ...overrides};
 }
 
 function syntheticFirmware(markers, size = 4096) {
@@ -63,6 +63,7 @@ function fakeWorkspace(compileResults) {
       if (spec.withBuildMarker !== false) markers.push(`ATECH-BUILD:${meta.buildId}`);
       if (spec.withAgentMarker !== false) markers.push('ATECH-CLOUD-AGENT:1');
       if (spec.withProvMarker !== false) markers.push('ATECH-PROV:1');
+      if (spec.withSignMarker !== false) markers.push('ATECH-FWSIGN:1');
       fs.writeFileSync(firmwarePath, syntheticFirmware(markers));
       return {ok: true, code: 0, timedOut: false, log: 'build log\n[SUCCESS]', firmwarePath, diagnostics: []};
     },

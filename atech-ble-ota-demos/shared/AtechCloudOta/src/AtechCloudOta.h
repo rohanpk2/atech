@@ -32,6 +32,16 @@ struct AtechCloudOtaConfig {
   // dashboard, so it runs privileged).
   String (*extraReport)();
   void (*command)(const String &form);
+  // Optional: form fields appended to the login body only (the hotspot credentials the owner's
+  // dashboard shows for a local update). They travel once per session over the authenticated TLS link.
+  String (*extraLogin)();
+  // Optional: form fields appended to every poll (the transport controller's state).
+  String (*extraPoll)();
+  // Optional: "unknown|checking|ok|captive|offline" from the station's connectivity probe. A captive
+  // network is reported as such instead of an endless TLS error.
+  const char *(*internetState)();
+  // Optional: called after repeated poll failures so the Wi-Fi layer re-probes for a captive page.
+  void (*internetRecheck)();
 };
 
 class AtechCloudOta {
@@ -50,6 +60,7 @@ public:
   bool isTransferring() const;    // a job owns flash right now
   bool holdsConfirm() const;      // a cloud-deployed image awaits the backend's acknowledgment
   bool hasSession() const;        // logged in to the backend right now (the backend holds this board's token)
+  uint32_t lastContactAgeMs() const;  // ms since the last successful exchange (0xFFFFFFFF when there was none)
 
   // Server URL: the hotspot portal stores one in NVS; otherwise the compiled-in default.
   String serverUrl() const;

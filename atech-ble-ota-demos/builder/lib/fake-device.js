@@ -8,6 +8,7 @@
 const crypto = require('node:crypto');
 const http = require('node:http');
 const {beginMessage, controlMessage, syncMessage, hmacHex, constantTimeEqual} = require('./lan-auth');
+const {verifyManifest, keyIdOf} = require('./signing');
 
 const NONCE_TTL_MS = 90000;
 const CHUNK_MAX = 256 * 1024;
@@ -19,7 +20,7 @@ function syntheticFirmware({demo = 1, build = 'stock', target = '', size = 64 * 
   buf.writeUInt16LE(chipId, 12);
   if (appDesc) buf.writeUInt32LE(0xABCD5432, 32);
   let offset = 1024;
-  for (const marker of [`ATECH-OTA-APP-DEMO${demo}\0`, `ATECH-BUILD:${build}\0`, `ATECH-TARGET:${target}\0`, 'ATECH-CLOUD-AGENT:1\0', 'ATECH-PROV:1\0']) {
+  for (const marker of [`ATECH-OTA-APP-DEMO${demo}\0`, `ATECH-BUILD:${build}\0`, `ATECH-TARGET:${target}\0`, 'ATECH-CLOUD-AGENT:1\0', 'ATECH-PROV:1\0', 'ATECH-FWSIGN:1\0']) {
     buf.write(marker, offset, 'latin1');
     offset += marker.length + 3;
   }
@@ -36,6 +37,9 @@ function createFakeDevice({
     pending: false, canRollback: false, safe: false, loops: 0, bootAt: Date.now(), otaOwner: '', previousBuild: null,
     nonces: new Map(), session: null, rebooting: false, lastTransferError: '', lastTransferMs: 0, confirmCount: 0,
     events: [], faults: {...faults}, port, ip: host, stopped: false, rebootTimer: null, sync,
+    // Firmware signing, like shared/AtechFwSign: the first authenticated key is pinned, the highest
+    // confirmed app version is remembered, the manifest headers of the last begin are kept for tests.
+    pinnedKey: null, maxVersion: 0, installedVersion: 0, lastBegin: null,
   };
   const note = (text) => { state.events.push(text); log(text); };
 
@@ -84,6 +88,19 @@ function createFakeDevice({
     state.otaOwner = '';
     state.lastTransferError = reason;
     note(`aborted: ${reason}`);
+  }
+
+  // candidate: the key the authenticated upload carries while no key is pinned (verified first, pinned after success).
+  function checkSignature(manifest, sig, digest, candidate) {
+    if (!sig) return state.faults.allowUnsigned ? null : 'This image carries no Atech signature; download the signed update package from the dashboard';
+    if (manifest.target && manifest.target !== state.id) return `Image was signed for ${manifest.target}, not this board`;
+    const key = state.pinnedKey || (candidate && /^04[0-9a-f]{128}$/.test(candidate) ? candidate : null);
+    if (!key) return 'No firmware signing key is provisioned on this board; connect it to the build service once, or set the key on its hotspot page';
+    if (!verifyManifest({...manifest, sha256: digest}, sig, key)) return `Firmware signature does not verify with this board's signing key ${keyIdOf(key)}`;
+    if (manifest.version < state.maxVersion && !manifest.downgrade) {
+      return `Downgrade refused: this board has run app version ${state.maxVersion} and this build is version ${manifest.version}; allow the downgrade in the dashboard to install it`;
+    }
+    return null;
   }
 
   function validateHeader(buf) {
@@ -148,8 +165,15 @@ function createFakeDevice({
       if (state.otaOwner && state.otaOwner !== 'lan') { fail(res, 409, `Flash is owned by the ${state.otaOwner} updater`); return; }
       if (size > state.slotSize) { fail(res, 413, `Firmware is larger than the inactive OTA slot (${state.slotSize} bytes)`); return; }
       state.otaOwner = 'lan';
+      const sig = header('X-Atech-Sig').toLowerCase();
+      const key = header('X-Atech-Key').toLowerCase();
+      const target = header('X-Atech-Target').trim().toUpperCase();
+      state.lastBegin = {sig, version: header('X-Atech-Version'), downgrade: header('X-Atech-Downgrade'), target, key};
+      // The key rides with the upload and is pinned only once the image was accepted (finish), like the firmware.
       state.session = {id: crypto.randomBytes(16).toString('hex'), size, sha, buildId, received: 0, data: Buffer.alloc(size),
-                       startedAt: Date.now(), firstChunkAt: 0, lastActivity: Date.now()};
+                       startedAt: Date.now(), firstChunkAt: 0, lastActivity: Date.now(), sig, key,
+                       manifest: {build: buildId, demo: state.demo, size, sha256: sha, version: Number(header('X-Atech-Version')) || 0,
+                                  downgrade: header('X-Atech-Downgrade') === '1', target}};
       state.lastTransferError = '';
       note(`session begun for ${size} bytes build ${buildId}`);
       json(res, 200, {ok: true, session: state.session.id, chunk_max: CHUNK_MAX, partition: 'ota_1', slot_size: state.slotSize, erase_ms: 120});
@@ -202,7 +226,12 @@ function createFakeDevice({
       }
       const digest = crypto.createHash('sha256').update(data).digest('hex');
       if (digest !== session.sha) { abortSession('Image SHA-256 does not match the declared digest; inactive partition not selected'); fail(res, 422, 'Image SHA-256 does not match the declared digest'); return; }
+      // Signature and version policy, exactly like atech::ImageSink + atech::fwsign::verify on the board.
+      const signatureProblem = checkSignature(session.manifest, session.sig, digest, session.key);
+      if (signatureProblem) { abortSession(signatureProblem); fail(res, 422, signatureProblem); return; }
       if (state.faults.failFinish) { abortSession(state.faults.failFinish); fail(res, 422, state.faults.failFinish); return; }
+      if (session.key && !state.pinnedKey && /^04[0-9a-f]{128}$/.test(session.key)) state.pinnedKey = session.key;
+      state.installedVersion = session.manifest.version;
       const transferMs = Date.now() - session.firstChunkAt;
       state.lastTransferMs = transferMs;
       state.session = null;
@@ -246,7 +275,7 @@ function createFakeDevice({
       const expected = hmacHex(state.secret, controlMessage({deviceId: device, nonce: header('X-Atech-Nonce'), op}));
       if (!constantTimeEqual(expected, header('X-Atech-Auth').toLowerCase())) { fail(res, 401, 'Authorization failed'); return; }
       let status = 'ok';
-      if (op === 'confirm') { state.pending = false; state.confirmCount += 1; }
+      if (op === 'confirm') { state.pending = false; state.confirmCount += 1; state.maxVersion = Math.max(state.maxVersion, state.installedVersion || 0); }
       else if (op === 'rollback') {
         if (!state.canRollback || state.session) status = 'refused';
         else { setTimeout(() => { state.build = state.previousBuild || state.build; state.canRollback = false; simulateReboot({rollback: true}); }, 100); }

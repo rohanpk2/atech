@@ -21,6 +21,8 @@ const FIRST_AI_VERSION = 3;
 const AGENT_MARKER = 'ATECH-CLOUD-AGENT:';
 // ... and the Bluetooth Wi-Fi setup service (shared/AtechBleProv embeds this marker).
 const PROV_MARKER = 'ATECH-PROV:';
+// ... and the firmware signature verifier (shared/AtechFwSign embeds this marker).
+const SIGN_MARKER = 'ATECH-FWSIGN:';
 
 function crc32(buf) {
   let crc = 0xFFFFFFFF;
@@ -271,7 +273,7 @@ class JobStore {
         const image = fs.readFileSync(compiled.firmwarePath);
         const validation = deps.validateImage(image, {
           slotSize: config.slotSize, sizeMargin: config.sizeMargin,
-          markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER],
+          markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER, SIGN_MARKER],
         });
         if (!validation.ok) throw new Error(`Image validation failed: ${validation.errors.join('; ')}`);
         const target = path.join(jobDir, 'firmware.bin');
@@ -289,4 +291,4 @@ class JobStore {
   }
 }
 
-module.exports = {JobStore, STATES, crc32, AGENT_MARKER, PROV_MARKER};
+module.exports = {JobStore, STATES, crc32, AGENT_MARKER, PROV_MARKER, SIGN_MARKER};

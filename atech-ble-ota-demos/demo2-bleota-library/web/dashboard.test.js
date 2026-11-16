@@ -20,7 +20,7 @@ assert.deepEqual([...referencedIds].filter(id => !htmlIds.has(id) && !/^method[A
 const BUILDER_IDS = ['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSummary', 'aiCode', 'aiCodeMeta', 'aiDeploy',
   'aiDownload', 'aiTarget', 'aiConfirm', 'aiRollback', 'aiAttempts', 'aiLog', 'aiBackend', 'aiBrowserNote',
   'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples', 'devFind', 'devPair', 'devPairHost', 'devPairToken',
-  'methodWifi', 'methodBle', 'methodHotspot', 'deployStatus', 'deployPercent', 'deploySpeed', 'deployEta', 'deployPhases'];
+  'methodWifi', 'methodHotspot', 'deployStatus', 'deployPercent', 'deploySpeed', 'deployEta', 'deployPhases', 'localPanel', 'localPrepare', 'localSsid', 'localPass', 'localToken', 'localDone'];
 for (const id of BUILDER_IDS) assert.ok(htmlIds.has(id), `builder card must include #${id}`);
 
 const order = ['/shared/atech-identity.js', '/shared/atech-builder.js', 'src="bleota-client.js', 'src="app.js']
@@ -33,10 +33,10 @@ assert.match(styles, /@media \(max-width:/);
 assert.match(styles, /prefers-reduced-motion/);
 assert.doesNotMatch(html + app + styles + installHtml, /—/, 'copy must not contain em dashes');
 
-assert.match(html, /Atech-OTA-D2-&lt;suffix&gt;/, 'Wi-Fi fallback must identify the Demo 2 SoftAP');
+assert.match(html, /ATECH-&lt;suffix&gt;/, 'Wi-Fi fallback must identify the board hotspot');
 assert.match(html, /http:\/\/192\.168\.4\.1/);
 assert.match(html, /hold the physical <strong>BOOT<\/strong> button for about 3 seconds/);
-assert.match(html, /This dashboard does not fetch or upload/);
+assert.match(html, /does not upload over the hotspot/);
 assert.match(html, /href="install\.html"/);
 assert.match(html, /gb88/, 'the dashboard must credit the gb88 protocol it speaks');
 

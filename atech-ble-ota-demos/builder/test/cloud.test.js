@@ -19,6 +19,7 @@ const {sha256Hex} = require('../lib/lan-auth');
 const {JobStore} = require('../lib/jobs');
 const {loadConfig} = require('../lib/config');
 const {tempConfig} = require('./helpers');
+const {verifyManifest, createSigner} = require('../lib/signing');
 
 const BOARD = 'ATECH-A1B2C3D4E5F6';
 const OTHER = 'ATECH-000000000002';
@@ -50,7 +51,7 @@ async function boot({demo = 1, jobDemo = null, firmware = {}, faults = {}, cloud
   const device = createFakeCloudDevice({id: BOARD, demo, secret: SECRET, baseUrl, faults, pollMs: 40, chunkBytes: 65536});
   if (startDevice) device.start();
   const claim = (ownerId = 'alice') => cloud.claim({id: BOARD, token: SECRET, name: 'Desk', ownerId});
-  const create = (ownerId = 'alice', deviceId = BOARD) => store.create({jobId: job.id, deviceId, ownerId});
+  const create = (ownerId = 'alice', deviceId = BOARD, options = {}) => store.create({jobId: job.id, deviceId, ownerId, ...options});
   const states = [];
   const follow = id => store.subscribe(id, snapshot => { if (states.at(-1) !== snapshot.state) states.push(snapshot.state); });
   const stop = async () => { await device.stop(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); };
@@ -59,7 +60,7 @@ async function boot({demo = 1, jobDemo = null, firmware = {}, faults = {}, cloud
     const {nonce} = cloud.challenge({id, ip: 'test'});
     return (await cloud.login({id, nonce, proof: proofHex(SECRET, {deviceId: id, nonce}), info: {demo: String(demo), build: 'stock'}, ip: 'test'})).session;
   };
-  return {config, devices, cloud, jobs, job: jobs.get(job.id), image, store, server, baseUrl, device, claim, create, states, follow, stop, advance, now, session};
+  return {config, devices, cloud, jobs, job: jobs.get(job.id), image, store, server, baseUrl, device, claim, create, states, follow, stop, advance, now, session, signer: store.signer};
 }
 
 test('pairing: wrong token refused, right token claims, other owner cannot deploy', async () => {
@@ -493,5 +494,86 @@ test('an image from before the provisioning service is refused with a rebuild hi
     fs.writeFileSync(file, image);
     ctx.jobs.update(ctx.jobs.jobs.get(ctx.job.id), {firmware: {size: image.length, crc32: '0', sha256: sha256Hex(image), path: 'x'}});
     assert.throws(() => ctx.create(), error => error.code === 'rebuild' && /before 2026-10-29|rebuild/i.test(error.message));
+  } finally { await ctx.stop(); }
+});
+
+test('poll manifest carries a verifiable signature bound to the device', async () => {
+  const ctx = await boot();
+  try {
+    await ctx.claim();
+    const d = ctx.create();
+    assert.equal(d.version, ctx.job.appVersion);
+    assert.equal(d.downgrade, false);
+    assert.match(d.signature, /^[0-9a-f]{128}$/);
+    assert.equal(d.kid, ctx.signer.keyId());
+    const manifest = ctx.store.manifest(ctx.store.deployments.get(d.id));
+    assert.equal(manifest.sig, d.signature);
+    assert.equal(manifest.dg, 0);
+    assert.equal(manifest.kid, ctx.signer.keyId());
+    assert.equal(manifest.target, BOARD);
+    assert.equal(manifest.ver, ctx.job.appVersion);
+    assert.equal(verifyManifest({build: d.buildId, demo: 1, size: d.total, sha256: d.sha256, version: d.version, downgrade: false, target: BOARD}, d.signature, ctx.signer.publicKeyHex()), true);
+    assert.equal(verifyManifest({build: d.buildId, demo: 1, size: d.total, sha256: d.sha256, version: d.version, downgrade: false, target: OTHER}, d.signature, ctx.signer.publicKeyHex()), false);
+    await ctx.device.waitFor(() => ctx.store.get(d.id).state === 'succeeded', 6000);
+    assert.equal(ctx.device.state.pinnedKey, ctx.signer.publicKeyHex(), 'the board pinned the key the login answer carried');
+    assert.equal(ctx.device.state.maxVersion, ctx.job.appVersion, 'the confirmed version is recorded');
+  } finally { await ctx.stop(); }
+});
+
+test('job for another target is refused by the board', async () => {
+  const ctx = await boot();
+  try {
+    await ctx.claim();
+    const original = ctx.store.manifest.bind(ctx.store);
+    ctx.store.manifest = d => ({...original(d), target: OTHER});
+    const d = ctx.create();
+    await ctx.device.waitFor(() => ctx.store.get(d.id).state === 'failed', 6000);
+    const failed = ctx.store.get(d.id);
+    assert.equal(failed.reason, 'device');
+    assert.match(failed.error, /signed for ATECH-000000000002, not this board/);
+    assert.equal(ctx.device.state.build, 'stock', 'nothing was installed');
+  } finally { await ctx.stop(); }
+});
+
+test('downgrade is refused without the flag and accepted with it', async () => {
+  const ctx = await boot();
+  try {
+    await ctx.claim();
+    ctx.device.state.maxVersion = ctx.job.appVersion + 6;
+    const refused = ctx.create();
+    await ctx.device.waitFor(() => ctx.store.get(refused.id).state === 'failed', 6000);
+    assert.equal(ctx.store.get(refused.id).reason, 'device');
+    assert.match(ctx.store.get(refused.id).error, /Downgrade refused: this board has run app version \d+ and this build is version \d+/);
+    const allowed = ctx.create('alice', BOARD, {allowDowngrade: true});
+    assert.equal(allowed.downgrade, true);
+    assert.equal(ctx.store.manifest(ctx.store.deployments.get(allowed.id)).dg, 1);
+    await ctx.device.waitFor(() => ctx.store.get(allowed.id).state === 'succeeded', 6000);
+    assert.equal(ctx.device.state.build, ctx.job.buildId);
+  } finally { await ctx.stop(); }
+});
+
+test('a tampered signature fails the job with reason device', async () => {
+  const ctx = await boot();
+  try {
+    await ctx.claim();
+    const original = ctx.store.manifest.bind(ctx.store);
+    ctx.store.manifest = d => { const m = original(d); return {...m, sig: (m.sig[0] === '0' ? '1' : '0') + m.sig.slice(1)}; };
+    const d = ctx.create();
+    await ctx.device.waitFor(() => ctx.store.get(d.id).state === 'failed', 6000);
+    assert.equal(ctx.store.get(d.id).reason, 'device');
+    assert.match(ctx.store.get(d.id).error, /signature does not verify/);
+  } finally { await ctx.stop(); }
+});
+
+test('a board that trusts another key refuses this backend until the key is updated', async () => {
+  const ctx = await boot();
+  try {
+    await ctx.claim();
+    const other = createSigner({file: `${ctx.config.buildsDir}/other-signer.pem`});
+    ctx.device.state.pinnedKey = other.publicKeyHex();
+    const d = ctx.create();
+    await ctx.device.waitFor(() => ctx.store.get(d.id).state === 'failed', 6000);
+    assert.match(ctx.store.get(d.id).error, /signature does not verify/);
+    assert.equal(ctx.device.state.pinnedKey, other.publicKeyHex(), 'the login answer never replaces a pinned key');
   } finally { await ctx.stop(); }
 });

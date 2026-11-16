@@ -123,6 +123,8 @@ function loadConfig(env = process.env) {
     // Cloud OTA: the public origin boards report to, and the job timings.
     publicUrl: publicUrl(env),
     cloud: cloudSettings(env),
+    // Firmware signing key (ECDSA P-256, PEM). Created on first start; keep it with the builds.
+    signingKeyFile: env.ATECH_SIGNING_KEY_FILE ? path.resolve(env.ATECH_SIGNING_KEY_FILE) : path.join(buildsDir, 'signing', 'firmware-signing.pem'),
   };
 }
 

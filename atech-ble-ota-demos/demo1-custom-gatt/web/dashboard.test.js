@@ -41,18 +41,19 @@ assert.match(app, /Boolean\(navigator\.bluetooth\)/,
   'dashboard must detect Web Bluetooth availability');
 assert.doesNotMatch(app, /selectedTransport|selectTransport\(/,
   'method selection moved to the shared deployment panel (Wi-Fi first, Bluetooth backup, hotspot last)');
-assert.match(html, /id="methodWifi"[\s\S]*id="methodBle"[\s\S]*id="methodHotspot"/,
-  'deployment panel must list Wi-Fi, Bluetooth and hotspot in priority order');
-assert.match(html, /Atech-OTA-D1-&lt;suffix&gt;/,
-  'hotspot fallback must identify the Demo 1 SoftAP');
+assert.match(html, /id="methodWifi"[\s\S]*id="methodHotspot"/,
+  'deployment panel must list Wi-Fi then the local Wi-Fi update; Bluetooth is not a firmware transport');
+assert.doesNotMatch(html, /id="methodBle"/, 'no Bluetooth transport card');
+assert.match(html, /ATECH-&lt;suffix&gt;/,
+  'hotspot fallback must identify the board hotspot');
 assert.match(html, /http:\/\/192\.168\.4\.1/,
   'hotspot fallback must point at the device-hosted portal');
 assert.match(html, /hold the physical <strong>BOOT<\/strong> button for about 3 seconds/,
   'hotspot fallback must explain runtime BOOT activation');
-assert.match(html, /This dashboard does not fetch or upload/,
-  'dashboard must hand off hotspot upload to the device portal');
-assert.match(html, /Disconnect any active Bluetooth session/,
-  'hotspot fallback must require BLE disconnection for exclusive OTA ownership');
+assert.match(html, /does not upload over the hotspot/,
+  'dashboard must hand off the hotspot upload to the board page');
+assert.match(html, /upload it on the board's page|upload it there/,
+  'the local update hands the package to the board page');
 assert.match(html, /Join this network/, 'hotspot steps must cover home Wi-Fi provisioning');
 assert.match(app, /meta\.onProgress/, 'BLE OTA must report progress to the shared deployment panel');
 assert.match(app, /meta\.onPhase/, 'BLE OTA must report phases to the shared deployment panel');
@@ -65,8 +66,8 @@ const BUILDER_IDS = ['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSummary', 
   'aiReview', 'aiProgress', 'aiProgressBar', 'aiExamples',
   // device panel and deployment panel
   'devDot', 'devBadge', 'devStatus', 'devWifi', 'devIp', 'devBle', 'devFind', 'devForget', 'devList', 'devPairForm',
-  'devPairHost', 'devPairToken', 'devPair', 'devHint', 'keyBanner', 'methodWifi', 'methodBle', 'methodHotspot',
-  'methodWifiNote', 'methodBleNote', 'methodHotspotNote', 'deployStatus', 'deployBadge', 'deployProgress',
+  'devPairHost', 'devPairToken', 'devPair', 'devHint', 'keyBanner', 'methodWifi', 'methodHotspot',
+  'methodWifiNote', 'methodHotspotNote', 'deployStatus', 'deployBadge', 'deployProgress', 'localPanel', 'localPrepare', 'localSsid', 'localPass', 'localToken', 'localDone',
   'deployProgressBar', 'deployTransport', 'deployPercent', 'deployBytes', 'deploySpeed', 'deployEta', 'deployTime',
   'deployPhases', 'deployChecks', 'deployAbort'];
 for (const id of BUILDER_IDS) assert.ok(htmlIds.has(id), `builder card must include #${id}`);

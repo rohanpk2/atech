@@ -8,6 +8,7 @@
 // machine behaviour, never ESP32 radio, TLS or flash performance.
 const crypto = require('node:crypto');
 const {proofHex, parseKv} = require('./cloud-auth');
+const {verifyManifest, keyIdOf} = require('./signing');
 
 const DEVICE_MAX_FAILURES = 8;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -28,6 +29,9 @@ function createFakeCloudDevice({
   const defaults = {
     id, demo, build, previousBuild: null, app: 'blue default', ver: 1, fw: `simulated demo${demo} build ${build}`, slotSize: 0x600000,
     pending: false, safe: false, loops: 0, bootAt: Date.now(), confirmCount: 0, bootMarker: null, done: null, transferring: false, rebooting: false,
+    apSsid: `ATECH-${id.slice(-6)}`, apPass: `simulated-hotspot-${id.slice(-6).toLowerCase()}`,
+    // Firmware signing, like shared/AtechFwSign: key pinned at the first login, highest confirmed version kept.
+    pinnedKey: null, maxVersion: 0, installedVersion: 0,
   };
   for (const [key, value] of Object.entries(defaults)) if (shared[key] === undefined) shared[key] = value;
   const device = {
@@ -43,6 +47,8 @@ function createFakeCloudDevice({
     const body = {demo: String(s.demo), fw: s.fw, build: s.build, app: s.app, ver: String(s.ver), slot_size: String(s.slotSize), core: 'sim', agent: '1',
                   pending: s.pending ? '1' : '0', safe: s.safe ? '1' : '0', up: String(up), loops: String(s.loops), rssi: '-51',
                   heap: String(faults.heap || 180000), heap_min: String(faults.heap || 150000),
+                  internet: faults.internet || 'ok', transport: faults.transport || 'cloud', reason: faults.transport ? 'offline' : 'online', hotspot: faults.transport === 'hotspot' ? '1' : '0',
+                  mac: s.id.slice(6).match(/../g).join(':'), wifi_auth: 'personal', kid: s.pinnedKey ? keyIdOf(s.pinnedKey) : '', max_ver: String(s.maxVersion),
                   ...(device.sync ? {sync: JSON.stringify(device.sync.compact())} : {}), ...extra};
     return new URLSearchParams(body).toString();
   }
@@ -63,7 +69,8 @@ function createFakeCloudDevice({
     const proof = faults.wrongToken ? 'f'.repeat(64) : proofHex(secret, {deviceId: id, nonce: kv.nonce});
     const marker = device.state.bootMarker;
     const response = await call('POST', '/api/device/login', {
-      body: `id=${encodeURIComponent(id)}&nonce=${kv.nonce}&proof=${proof}&` + identityBody(marker ? {boot_job: marker.job, boot_build: marker.build} : {}),
+      body: `id=${encodeURIComponent(id)}&nonce=${kv.nonce}&proof=${proof}&` +
+            identityBody({ap_ssid: device.state.apSsid, ap_pass: device.state.apPass, ...(marker ? {boot_job: marker.job, boot_build: marker.build} : {})}),
     });
     const result = parseKv(await response.text());
     if (response.status === 403 && result.code === 'unclaimed') { device.stats.unclaimed++; return false; }
@@ -71,6 +78,7 @@ function createFakeCloudDevice({
     if (response.status !== 200 || !result.session) throw new Error(`login failed: HTTP ${response.status} ${result.error || ''}`);
     device.session = result.session;
     device.pollMs = Number(result.poll) || pollMs;
+    if (result.sign_key && !device.state.pinnedKey && /^04[0-9a-f]{128}$/i.test(result.sign_key)) device.state.pinnedKey = result.sign_key.toLowerCase();
     device.stats.logins++;
     note('logged in');
     return true;
@@ -103,7 +111,7 @@ function createFakeCloudDevice({
     } else if (newBuild) {
       s.previousBuild = s.build;
       if (faults.rollbackOnReboot) { s.pending = false; }   // the bootloader returned to the previous image
-      else { s.build = newBuild; s.pending = true; s.app = `app ${newBuild}`; s.ver += 1; s.safe = Boolean(faults.safeModeOnReboot); }
+      else { s.build = newBuild; s.pending = true; s.app = `app ${newBuild}`; s.ver = s.installedVersion || s.ver + 1; s.safe = Boolean(faults.safeModeOnReboot); }
     }
     s.fw = `simulated demo${s.demo} build ${s.build}`;
     s.rebooting = false;
@@ -169,6 +177,18 @@ function createFakeCloudDevice({
       }
       const digest = crypto.createHash('sha256').update(data).digest('hex');
       if (digest !== String(job.sha256).toLowerCase()) throw new Error('Image SHA-256 does not match the declared digest; inactive partition not selected');
+      // Signature and version policy, exactly like atech::ImageSink + atech::fwsign::verify on the board.
+      const manifest = {build: job.build, demo: Number(job.demo), size, sha256: digest, version: Number(job.ver) || 0, downgrade: job.dg === '1', target: String(job.target || '')};
+      if (!job.sig) { if (!faults.allowUnsigned) throw new Error('This image carries no Atech signature; download the signed update package from the dashboard'); }
+      else {
+        if (manifest.target && manifest.target !== s.id) throw new Error(`Image was signed for ${manifest.target}, not this board`);
+        if (!s.pinnedKey) throw new Error('No firmware signing key is provisioned on this board; connect it to the build service once, or set the key on its hotspot page');
+        if (!verifyManifest(manifest, job.sig, s.pinnedKey)) throw new Error(`Firmware signature does not verify with this board's signing key ${keyIdOf(s.pinnedKey)}`);
+        if (manifest.version < s.maxVersion && !manifest.downgrade) {
+          throw new Error(`Downgrade refused: this board has run app version ${s.maxVersion} and this build is version ${manifest.version}; allow the downgrade in the dashboard to install it`);
+        }
+      }
+      s.installedVersion = manifest.version;
       await report(job.job, 'installing', {received: String(size), total: String(size)});
       if (faults.vanishAfterPhase === 'installing') { faults.offline = true; return; }
       s.bootMarker = {job: job.job, build: job.build};
@@ -191,6 +211,7 @@ function createFakeCloudDevice({
     if (action === 'confirm') {
       if (s.safe) return;
       if (s.pending) { s.pending = false; s.confirmCount++; }
+      s.maxVersion = Math.max(s.maxVersion, s.ver);
       // Like the firmware: the marker is cleared only once the backend has the success report,
       // so a lost report is repeated on the next poll instead of silently dropped.
       const answer = await report(jobId, 'succeeded', {build: s.build});

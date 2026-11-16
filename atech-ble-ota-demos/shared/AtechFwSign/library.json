@@ -1,0 +1,10 @@
+{
+  "name": "AtechFwSign",
+  "version": "1.0.0",
+  "description": "Firmware signature verification for the Atech ESP32-S3 demos: ECDSA P-256 manifests signed by the build service, a pinned public key in NVS, and downgrade protection, used by every install path through atech::ImageSink",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "includeDir": "src"
+  }
+}

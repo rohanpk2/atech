@@ -19,9 +19,15 @@ function cloudUrlFlag(cloudUrl) {
   return `'-DATECH_CLOUD_URL="${String(cloudUrl).replace(/["'\\\s]/g, '')}"'`;
 }
 
-// cloudUrl: the backend's public origin, baked into the [env:ai] build only; the stock
-// environments keep their defaults so the USB baseline is unaffected by a workspace rewrite.
-function rewritePlatformioIni(ini, {sharedDir, cacheDir, cloudUrl = null}) {
+// The build flag that gives the firmware's signature verifier the backend's public key (130 hex).
+function signingKeyFlag(signingKey) {
+  return `'-DATECH_FW_PUBKEY="${String(signingKey).replace(/[^0-9a-fA-F]/g, '').toLowerCase()}"'`;
+}
+
+// cloudUrl and signingKey: the backend's public origin and signing public key, baked into the
+// [env:ai] build only; the stock environments keep their defaults so the USB baseline is unaffected
+// by a workspace rewrite.
+function rewritePlatformioIni(ini, {sharedDir, cacheDir, cloudUrl = null, signingKey = null}) {
   let out = String(ini);
   if (/^lib_extra_dirs\s*=/m.test(out)) {
     out = out.replace(/^lib_extra_dirs\s*=.*$/m, `lib_extra_dirs = ${sharedDir}`);
@@ -36,11 +42,12 @@ function rewritePlatformioIni(ini, {sharedDir, cacheDir, cloudUrl = null}) {
   // The post-build OTA size check lives in the shared directory; the workspace is elsewhere.
   out = out.replace(/^extra_scripts\s*=\s*post:\.\.\/shared\/(.*)$/m, (_, rest) => `extra_scripts = post:${sharedDir}/${rest}`);
   if (!/^\[env:ai\]/m.test(out)) out = out.trimEnd() + '\n' + AI_ENV_BLOCK;
-  if (cloudUrl) {
+  const extra = [cloudUrl ? cloudUrlFlag(cloudUrl) : null, signingKey ? signingKeyFlag(signingKey) : null].filter(Boolean);
+  if (extra.length) {
     const start = out.indexOf('[env:ai]');
     const next = out.indexOf('\n[', start + 1);
     const section = next < 0 ? out.slice(start) : out.slice(start, next);
-    const patched = section.replace(/^(build_flags\s*=.*)$/m, (line) => `${line} ${cloudUrlFlag(cloudUrl)}`);
+    const patched = section.replace(/^(build_flags\s*=.*)$/m, (line) => `${line} ${extra.join(' ')}`);
     out = out.slice(0, start) + patched + (next < 0 ? '' : out.slice(next));
   }
   return out;
@@ -82,7 +89,7 @@ async function prepareWorkspace(demo, {code, meta}, {config = loadConfig()} = {}
   await fsp.writeFile(path.join(dir, 'platformio.ini'),
                       rewritePlatformioIni(ini, {sharedDir: config.sharedDir,
                                                  cacheDir: path.join(config.buildsDir, 'cache'),
-                                                 cloudUrl: config.publicUrl || null}));
+                                                 cloudUrl: config.publicUrl || null, signingKey: config.signingPublicKey || null}));
   await fsp.copyFile(path.join(entry.dir, 'partitions.csv'), path.join(dir, 'partitions.csv'));
   await fsp.cp(path.join(entry.dir, 'src'), srcDir, {
     recursive: true, force: true,
@@ -104,4 +111,4 @@ async function compileWorkspace(demo, dir, {config = loadConfig(), onLine, timeo
           firmwarePath: ok ? firmwarePath : null};
 }
 
-module.exports = {rewritePlatformioIni, renderAppBuildHeader, prepareWorkspace, compileWorkspace, workspaceDir, cloudUrlFlag};
+module.exports = {rewritePlatformioIni, renderAppBuildHeader, prepareWorkspace, compileWorkspace, workspaceDir, cloudUrlFlag, signingKeyFlag};

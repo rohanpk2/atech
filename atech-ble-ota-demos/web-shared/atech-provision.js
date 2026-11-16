@@ -9,10 +9,10 @@
 // (builder/lib/fake-prov-board.js) implement the same byte layout; keep them identical.
 //
 //   frame   = [flags][seq][payload <= 240]     flags: bit0 last, bit1 first
-//   message = [opcode][body], at most 1024 bytes reassembled
+//   message = [opcode][body], at most 6144 bytes reassembled
 //   hello   : body = client public key (65 bytes, uncompressed)
 //             reply 0x81 = [board public key 65][nonce 16][flags 1: bit0 locked, bit1 wifi, bit2 url]
-//   scan    : reply 0x82 = text lines "ssid<TAB>rssi<TAB>open"
+//   scan    : reply 0x82 = text lines "ssid<TAB>rssi<TAB>open<TAB>enterprise" (the last field is optional)
 //   provision / forget: body = [iv 12][ciphertext][tag 16], AAD = the opcode byte; the reply
 //             (0x83 / 0x84) is encrypted the same way with its own opcode as AAD. The plaintext
 //             on both sides is a form body (key=value&..., percent-encoded, booleans as 1/0):
@@ -31,7 +31,7 @@
   const FLAG_LAST = 0x01;
   const FLAG_FIRST = 0x02;
   const MAX_FRAGMENT = 240;
-  const MAX_MESSAGE = 1024;
+  const MAX_MESSAGE = 6144;   // an enterprise profile with a CA chain and a client certificate fits
   const PUBLIC_KEY_BYTES = 65;
   const NONCE_BYTES = 16;
   const IV_BYTES = 12;
@@ -117,9 +117,9 @@
     const networks = [];
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
-      const [ssid, rssi, open] = line.split('\t');
+      const [ssid, rssi, open, enterprise] = line.split('\t');
       if (!ssid) continue;
-      networks.push({ssid, rssi: Number(rssi) || 0, open: open === '1'});
+      networks.push({ssid, rssi: Number(rssi) || 0, open: open === '1', enterprise: enterprise === '1'});
     }
     return networks;
   }
@@ -222,6 +222,8 @@
       if (out.joining !== undefined) result.joining = out.joining === '1';
       if (out.token) result.token = out.token;
       if (out.code) result.code = out.code;
+      if (out.ap_ssid) result.apSsid = out.ap_ssid;
+      if (out.ap_pass) result.apPass = out.ap_pass;
       if (out.error) result.error = out.error;
       return result;
     }
@@ -252,7 +254,9 @@
       return unseal(op | REPLY_BIT, body);
     }
 
-    // {ssid, pass, url, grant, claim}: every field optional; only what is present is applied.
+    // {ssid, pass, auth, ident, user, ca, crt, key, ph2, domain, ca_bundle, url, grant, claim, hotspot}: every
+    // field optional; only what is present is applied. auth is personal|peap|ttls|tls; hotspot asks for the
+    // board's hotspot credentials in the (sealed) reply.
     function provision(payload) { return sealedRequest(OPS.provision, payload || {}); }
     // {wifi, url, grant}
     function forget(payload) { return sealedRequest(OPS.forget, payload || {}); }

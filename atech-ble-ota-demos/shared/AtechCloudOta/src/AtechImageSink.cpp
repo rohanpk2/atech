@@ -107,8 +107,8 @@ void ImageSink::abort() { release(); }
 bool ImageSink::begin(uint32_t size, const String &sha256Hex, const String &buildId, const String &imageIdentity, String &reason) {
   release();
   if (size < MIN_IMAGE_BYTES) { reason = F("Declared image size is too small for an application"); return false; }
-  if (sha256Hex.length() != 64) { reason = F("Declared SHA-256 is not 64 hex characters"); return false; }
-  if (buildId.isEmpty() || buildId.length() > 40) { reason = F("Missing or invalid build id"); return false; }
+  if (!sha256Hex.isEmpty() && sha256Hex.length() != 64) { reason = F("Declared SHA-256 is not 64 hex characters"); return false; }
+  if (buildId.length() > 40) { reason = F("Invalid build id"); return false; }
   const esp_partition_t *running = esp_ota_get_running_partition();
   _partition = esp_ota_get_next_update_partition(nullptr);
   if (!_partition || _partition == running) { reason = F("No inactive OTA application partition is available"); return false; }
@@ -125,6 +125,8 @@ bool ImageSink::begin(uint32_t size, const String &sha256Hex, const String &buil
   _expectedSha.toLowerCase();
   _buildId = buildId;
   _digest = "";
+  _manifest = fwsign::Manifest();
+  _hasManifest = false;
   _prefixLength = 0;
   _headerOk = false;
   mbedtls_sha256_init(&_sha);
@@ -132,10 +134,19 @@ bool ImageSink::begin(uint32_t size, const String &sha256Hex, const String &buil
   _shaStarted = true;
   _identity.reset(reinterpret_cast<const uint8_t *>(imageIdentity.c_str()), imageIdentity.length());
   const String buildMarker = String(BUILD_PREFIX) + buildId;
-  _build.reset(reinterpret_cast<const uint8_t *>(buildMarker.c_str()), buildMarker.length() + 1);  // include the NUL
+  // An empty build id (an unsigned lab image) disarms the build-marker check; the signature policy decides.
+  _build.reset(reinterpret_cast<const uint8_t *>(buildMarker.c_str()), buildId.isEmpty() ? 0 : buildMarker.length() + 1);  // include the NUL
   _target.reset();
   _active = true;
   return true;
+}
+
+void ImageSink::setManifest(const fwsign::Manifest &manifest) {
+  _manifest = manifest;
+  _manifest.sha256.toLowerCase();
+  _manifest.signature.toLowerCase();
+  _hasManifest = true;
+  if (_expectedSha.isEmpty() && _manifest.sha256.length() == 64) _expectedSha = _manifest.sha256;
 }
 
 bool ImageSink::validatePrefix(String &reason) {
@@ -185,7 +196,7 @@ bool ImageSink::finish(String &reason) {
   }
   if (!_headerOk) { reason = F("Application header was never validated"); return false; }
   if (!_identity.found) { reason = F("Firmware belongs to a different Atech demo/target"); return false; }
-  if (!_build.found) { reason = String(F("Image does not carry build id ")) + _buildId; return false; }
+  if (_build.length > 0 && !_build.found) { reason = String(F("Image does not carry build id ")) + _buildId; return false; }
   if (_target.complete && _target.capturedLength > 0 && strcmp(_target.captured, atech::deviceId()) != 0) {
     reason = String(F("Image was built for ")) + _target.captured + F(", not this board");
     return false;
@@ -195,7 +206,22 @@ bool ImageSink::finish(String &reason) {
   mbedtls_sha256_free(&_sha);
   _shaStarted = false;
   _digest = hexEncode(digest, sizeof(digest));
-  if (!constantTimeEquals(_digest, _expectedSha)) { reason = F("Image SHA-256 does not match the declared digest; inactive partition not selected"); return false; }
+  if (!_expectedSha.isEmpty() && !constantTimeEquals(_digest, _expectedSha)) { reason = F("Image SHA-256 does not match the declared digest; inactive partition not selected"); return false; }
+  // Signature: the signed manifest must describe exactly these bytes, this build and this board, and
+  // the version policy must allow it. Without a manifest the policy decides (lab builds only).
+  if (_hasManifest) {
+    if (_manifest.sha256.length() == 64 && !constantTimeEquals(_digest, _manifest.sha256)) { reason = F("Image SHA-256 does not match the signed manifest; inactive partition not selected"); return false; }
+    if (!_manifest.build.isEmpty() && _manifest.build != _buildId) { reason = String(F("The signed manifest names build ")) + _manifest.build + F(", not ") + _buildId; return false; }
+    if (!_manifest.target.isEmpty() && _manifest.target != atech::deviceId()) { reason = String(F("Image was signed for ")) + _manifest.target + F(", not this board"); return false; }
+    _manifest.sha256 = _digest;
+    _manifest.size = _expected;
+  } else {
+    _manifest = fwsign::Manifest();
+    _manifest.build = _buildId;
+    _manifest.size = _expected;
+    _manifest.sha256 = _digest;
+  }
+  if (!fwsign::verify(_manifest, reason)) return false;
   // esp_ota_end validates the ESP image (checksum, appended hash, and when enabled secure boot
   // and anti-rollback). It never selects the image.
   const esp_err_t validation = esp_ota_end(_handle);

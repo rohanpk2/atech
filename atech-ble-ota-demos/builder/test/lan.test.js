@@ -17,6 +17,7 @@ const {DeploymentStore} = require('../lib/lan-ota');
 const {createFakeDevice, syntheticFirmware} = require('../lib/fake-device');
 const {JobStore} = require('../lib/jobs');
 const {tempConfig} = require('./helpers');
+const {verifyManifest, createSigner} = require('../lib/signing');
 
 const SECRET = 'fixture-ota-token-0123456789';
 const BOARD = 'ATECH-A1B2C3D4E5F6';
@@ -347,5 +348,70 @@ test('discovery merges mDNS answers with pairing state', async () => {
     assert.equal(after[0].paired, true);
     assert.equal(ctx.devices.remove(BOARD), true);
     assert.equal(ctx.devices.list().length, 0);
+  } finally { await ctx.device.stop(); }
+});
+
+test('begin carries the signature headers and the fake board verifies them', async () => {
+  const config = tempConfig();
+  const jobs = new JobStore({config, provider: {name: 'fake', model: 'm', async generate() { throw new Error('unused'); }}, deps: {readApiHeader: () => '//'}});
+  const job = jobs.create({demo: 1, prompt: 'blink'});
+  const image = syntheticFirmware({demo: 1, build: job.buildId, size: 200 * 1024});
+  fs.writeFileSync(path.join(jobs.jobsDir, job.id, 'firmware.bin'), image);
+  jobs.update(jobs.jobs.get(job.id), {state: 'ready', stage: 'Ready', firmware: {size: image.length, crc32: '0', sha256: auth.sha256Hex(image), path: 'x'}, appName: 'Blink'});
+  const device = createFakeDevice({id: BOARD, demo: 1, secret: SECRET, rebootMs: 100});
+  const {host, port} = await device.start();
+  const devices = new DeviceRegistry({config, deps: {discover: async () => [], resolveHost: async () => null}});
+  await devices.pair({host, port, token: SECRET});
+  const store = new DeploymentStore({config, jobs, devices, deps: {delay: ms => new Promise(r => setTimeout(r, Math.min(ms, 50)))}});
+  try {
+    const d = store.create({jobId: job.id, deviceId: BOARD});
+    assert.equal(d.version, jobs.get(job.id).appVersion);
+    assert.equal(d.downgrade, false);
+    const result = await store.run(d.id);
+    assert.equal(result.state, 'verified', result.error);
+    const begin = device.state.lastBegin;
+    assert.equal(begin.version, String(jobs.get(job.id).appVersion));
+    assert.equal(begin.downgrade, '0');
+    assert.equal(begin.target, BOARD);
+    assert.equal(begin.key, store.signer.publicKeyHex());
+    assert.equal(verifyManifest({build: job.buildId, demo: 1, size: image.length, sha256: auth.sha256Hex(image), version: d.version, downgrade: false, target: BOARD}, begin.sig, store.signer.publicKeyHex()), true);
+    assert.equal(device.state.pinnedKey, store.signer.publicKeyHex(), 'an HMAC-authenticated begin may pin the first key');
+    assert.equal(device.state.maxVersion, d.version);
+
+    // A downgrade is refused by the board unless the dashboard allowed it; the signature covers the flag.
+    device.state.maxVersion = d.version + 3;
+    const lower = store.create({jobId: job.id, deviceId: BOARD});
+    const refused = await store.run(lower.id);
+    assert.equal(refused.state, 'failed');
+    assert.match(refused.error, /Downgrade refused/);
+    const allowed = store.create({jobId: job.id, deviceId: BOARD, allowDowngrade: true});
+    assert.equal((await store.run(allowed.id)).state, 'verified');
+
+    // A backend with another key is refused by a board that already trusts one.
+    const other = createSigner({file: path.join(config.buildsDir, 'other.pem')});
+    const foreign = new DeploymentStore({config, jobs, devices, signer: other, deps: {delay: ms => new Promise(r => setTimeout(r, Math.min(ms, 50)))}});
+    const bad = foreign.create({jobId: job.id, deviceId: BOARD});
+    const outcome = await foreign.run(bad.id);
+    assert.equal(outcome.state, 'failed');
+    assert.match(outcome.error, /signature does not verify/);
+  } finally { await device.stop(); }
+});
+
+test('identity summaries carry the signing state so the dashboard can see a downgrade', () => {
+  const {summarizeIdentity, cloudIdentity} = require('../lib/devices');
+  const lan = summarizeIdentity({id: BOARD, suffix: 'D4E5F6', demo: 1, fw: 'x', build: 'stock', app: 'a', ver: 5, net: {}, sign: {key: true, kid: 'abcd1234', max_ver: 7}});
+  assert.equal(lan.kid, 'abcd1234');
+  assert.equal(lan.maxVersion, 7);
+  const cloud = cloudIdentity({id: BOARD, cloud: {lastReport: {build: 'stock', ver: 5, kid: 'abcd1234', maxVersion: 7}}});
+  assert.equal(cloud.maxVersion, 7);
+  assert.equal(cloud.kid, 'abcd1234');
+});
+
+test('a refused upload does not pin the signing key', async () => {
+  const ctx = await boot({firmware: {target: 'ATECH-FFFFFFFFFFFF'}});
+  try {
+    const {result} = await pairAndDeploy(ctx);
+    assert.equal(result.state, 'failed');
+    assert.equal(ctx.device.state.pinnedKey, null, 'the key rides with the upload but is pinned only once the image was accepted');
   } finally { await ctx.device.stop(); }
 });

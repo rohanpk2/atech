@@ -33,15 +33,18 @@ function cloudIdentity(record) {
     build: r.build || record.build || '', app: r.app || '', ver: Number(r.ver || 0), slotSize: Number(r.slotSize || 0), pending: Boolean(r.pending),
     canRollback: false, safe: Boolean(r.safe), appState: r.safe ? 'disabled' : 'running', loops: Number(r.loops || 0), up: Number(r.up || 0),
     otaOwner: r.transferring ? 'cloud' : '', target: '', paired: true, source: 'cloud', heap: Number(r.heap || 0), heapMin: Number(r.heapMin || 0),
-    sync: r.sync || null,
+    sync: r.sync || null, kid: r.kid || '', maxVersion: Number(r.maxVersion || 0),
     wifi: {ssid: '', ip: '', rssi: Number(r.rssi || 0), hostname: '', mdns: '', port: 0, connected: true, transferring: Boolean(r.transferring),
-           lastTransferError: '', lastTransferMs: 0},
+           lastTransferError: '', lastTransferMs: 0, internet: r.internet || 'unknown', captiveUrl: r.captiveUrl || '', transport: r.transport || '',
+           transportReason: r.transportReason || '', hotspot: Boolean(r.hotspotActive), mac: r.mac || '', auth: r.wifiAuth || ''},
   };
 }
 
+// The listing never carries the board's secrets: the pairing token, and the hotspot password (the
+// owner fetches it on demand from /api/devices/:id/local-credentials).
 function publicRecord(record, extra = {}) {
-  const {secret, ...rest} = record;
-  return {...rest, paired: Boolean(secret), ...extra};
+  const {secret, hotspot, ...rest} = record;
+  return {...rest, ...(hotspot ? {hotspot: {ssid: hotspot.ssid}} : {}), paired: Boolean(secret), ...extra};
 }
 
 function summarizeIdentity(identity) {
@@ -52,10 +55,14 @@ function summarizeIdentity(identity) {
     app: identity.app, ver: Number(identity.ver || 0), slotSize: Number(identity.slotSize || 0), pending: Boolean(identity.pending),
     canRollback: Boolean(identity.canRollback), safe: Boolean(identity.safe), appState: identity.appState, loops: Number(identity.loops || 0),
     up: Number(identity.up || 0), otaOwner: identity.otaOwner || '', target: identity.target || '', paired: identity.paired !== false,
-    sync: identity.sync && typeof identity.sync === 'object' ? identity.sync : null,
+    sync: identity.sync && typeof identity.sync === 'object' ? identity.sync : null, kid: (identity.sign && identity.sign.kid) || '',
+    maxVersion: Number((identity.sign && identity.sign.max_ver) || 0),
     wifi: {ssid: net.ssid || '', ip: net.ip || '', rssi: Number(net.rssi || 0), hostname: net.hostname || '', mdns: net.mdns || '',
            port: Number(net.port || DEFAULT_PORT), connected: Boolean(net.connected), transferring: Boolean(net.transferring),
-           lastTransferError: net.last_transfer_error || '', lastTransferMs: Number(net.last_transfer_ms || 0)},
+           lastTransferError: net.last_transfer_error || '', lastTransferMs: Number(net.last_transfer_ms || 0),
+           internet: net.internet || 'unknown', captiveUrl: net.captive_url || '', transport: (identity.transport && identity.transport.transport) || '',
+           transportReason: (identity.transport && identity.transport.reason) || '', hotspot: Boolean(identity.transport && identity.transport.hotspot),
+           mac: net.mac || '', auth: net.auth || ''},
   };
 }
 

@@ -42,7 +42,7 @@ for (const needle of ['mbedtls_ecdh_setup', 'MBEDTLS_ECP_DP_SECP256R1', 'mbedtls
 
 // Frame limits and the fragment timeout.
 assert.match(impl, /MAX_FRAGMENT\s*=\s*240\b/, 'fragments carry at most 240 bytes');
-assert.match(impl, /MAX_MESSAGE\s*=\s*1024\b/, 'messages are at most 1024 bytes');
+assert.match(impl, /MAX_MESSAGE\s*=\s*6144\b/, 'messages are at most 6144 bytes (an enterprise profile with certificates fits)');
 assert.match(impl, /FRAGMENT_TIMEOUT_MS\s*=\s*5000\b/, 'an unfinished request is dropped after 5 s');
 assert.match(impl, /PROV_NONCE_BYTES\s*=\s*16\b/);
 assert.match(impl, /PROV_IV_BYTES\s*=\s*12\b/);
@@ -50,7 +50,23 @@ assert.match(impl, /PROV_TAG_BYTES\s*=\s*16\b/);
 
 // Behaviour: credentials and URL go through the existing libraries; the lock persists; the
 // BOOT press opens the physical-presence window; busy transports refuse changes.
-assert.ok(impl.includes('saveCredentials(') && impl.includes('forgetCredentials('), 'Wi-Fi credentials go through AtechWifiLan');
+assert.ok(impl.includes('saveProfile(') && impl.includes('forgetCredentials('), 'Wi-Fi profiles go through AtechWifiLan');
+// Enterprise profile fields and the hotspot credentials, shared with web-shared/atech-builder.js and builder/lib/fake-prov-board.js.
+for (const field of ['"auth"', '"ident"', '"user"', '"ca"', '"crt"', '"key"', '"ph2"', '"domain"', '"ca_bundle"', '"hotspot"']) {
+  assert.ok(impl.includes(field), `provision must read the ${field} field`);
+}
+assert.ok(header.includes('String (*hotspotReport)()') && impl.includes('config.hotspotReport()') && impl.includes('wantHotspot'),
+          'an authorized client may ask for the hotspot credentials (the portal produces ap_ssid=..&ap_pass=..)');
+const lanImpl = fs.readFileSync(path.join(root, 'shared', 'AtechWifiLan', 'src', 'AtechWifiLan.cpp'), 'utf8');
+const lanHeader = fs.readFileSync(path.join(root, 'shared', 'AtechWifiLan', 'src', 'AtechWifiLan.h'), 'utf8');
+assert.ok(lanHeader.includes('struct AtechWifiProfile') && lanHeader.includes('bool saveProfile(const AtechWifiProfile &'), 'AtechWifiLan stores one Wi-Fi profile');
+assert.ok(lanImpl.includes('Enterprise Wi-Fi needs a trusted CA certificate (PEM) or the built-in bundle; certificate checking is never disabled'), 'the CA refusal text is shared');
+for (const call of ['esp_eap_client_set_ca_cert', 'esp_eap_client_use_default_cert_bundle', 'esp_eap_client_set_domain_name', 'esp_eap_client_set_disable_time_check',
+                    'WPA2_AUTH_PEAP', 'WPA2_AUTH_TTLS', 'WPA2_AUTH_TLS', 'configTime(']) {
+  assert.ok(lanImpl.includes(call), `AtechWifiLan.cpp must use ${call}`);
+}
+assert.doesNotMatch(lanImpl, /setInsecure/, 'certificate checking is never disabled');
+assert.ok(lanImpl.includes('"enterprise"'), 'scan results classify enterprise networks');
 assert.ok(impl.includes('setServerUrl(') && impl.includes('clearServerUrl('), 'the server URL goes through AtechCloudOta');
 assert.ok(impl.includes('"locked"') && impl.includes('"atech_prov"'), 'the lock is persisted in NVS namespace atech_prov');
 assert.ok(impl.includes('hasSession()'), 'the first cloud login locks the board');
@@ -92,5 +108,23 @@ for (const [name, main] of Object.entries(mains)) {
   assert.ok(main.indexOf('coreAttachBle(') < main.indexOf('bleProv.begin('), `${name} must attach the identity service before provisioning`);
   assert.ok(main.indexOf('bleProv.begin(') < main.indexOf('BLEDevice::getAdvertising()'), `${name} must create the service before advertising`);
 }
+
+
+// The enterprise trust anchor is enforced when the board connects, not only when a profile is saved;
+// the profile is written certificates first so a half-written one never says "enterprise" without
+// its CA; the certificate budget fits the 20 KiB NVS partition; the identity carries the signing state.
+assert.ok(lanImpl.includes('enterprise profile has no trust anchor; not joining'), 'connectStation refuses an enterprise profile without a CA or the bundle');
+const persist = lanImpl.slice(lanImpl.indexOf('bool persistProfile('), lanImpl.indexOf('bool eraseCredentials('));
+assert.ok(persist.indexOf('putBlob("ca"') >= 0 && persist.indexOf('putUChar("auth"') > persist.indexOf('putBlob("key"'), 'certificates are written before the auth method');
+assert.match(lanImpl, /PEM_MAX\s*=\s*4096\b/, 'one PEM is at most 4 KiB');
+assert.match(lanImpl, /PEM_TOTAL_MAX\s*=\s*10240\b/, 'all certificates together are at most 10 KiB');
+assert.ok(lanImpl.includes('A certificate or key is too long (4 KiB limit)'), 'the per-file size refusal is shared with the simulators');
+assert.ok(lanImpl.includes('Certificates and key together exceed 10 KiB; use a shorter CA chain or the built-in bundle'), 'the total size refusal is shared with the simulators');
+assert.ok(lanImpl.includes('\\"sign\\":') && lanImpl.includes('fwsign::statusJson()'), 'the LAN identity carries the signing state (kid, max_ver)');
+const lanBegin = lanImpl.slice(lanImpl.indexOf('esp_err_t begin(httpd_req_t'), lanImpl.indexOf('esp_err_t finish(httpd_req_t'));
+const lanFinish = lanImpl.slice(lanImpl.indexOf('esp_err_t finish(httpd_req_t'), lanImpl.indexOf('esp_err_t finish(httpd_req_t') + 3000);
+assert.ok(lanBegin.length > 100 && lanFinish.length > 100, 'begin and finish handlers found');
+assert.ok(!lanBegin.includes('pinKey('), 'begin never pins a key');
+assert.ok(lanFinish.indexOf('pinKey(') > lanFinish.indexOf('sink.finish(reason)'), 'the key is pinned only after the sink accepted the image');
 
 console.log('Atech Bluetooth provisioning structure tests passed');

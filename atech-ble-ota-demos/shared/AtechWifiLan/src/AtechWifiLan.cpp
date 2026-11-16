@@ -4,7 +4,11 @@
 #include "AtechWifiLan.h"
 
 #include <AtechCore.h>
+#include <AtechFwSign.h>
+#include <AtechImageSink.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
+#include <NetworkClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_app_format.h>
@@ -16,10 +20,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <mbedtls/md.h>
-#include <mbedtls/sha256.h>
 #if __has_include(<esp_coexist.h>)
 #include <esp_coexist.h>
 #define ATECH_HAS_COEX 1
+#endif
+#if __has_include(<esp_eap_client.h>)
+#include <esp_eap_client.h>
+#define ATECH_HAS_EAP 1
 #endif
 
 #include <algorithm>
@@ -37,13 +44,38 @@ constexpr size_t RECV_BUFFER_BYTES = 16 * 1024;
 constexpr size_t SYNC_BODY_MAX = 1024;   // POST /api/sync form body
 constexpr size_t CHUNK_MAX_BYTES = 256 * 1024;
 constexpr size_t MIN_IMAGE_BYTES = 1024;
-constexpr size_t APP_PREFIX_SIZE =
-    sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(uint32_t);
-constexpr size_t HEADER_VALUE_MAX = 96;
-constexpr size_t TARGET_ID_MAX = 20;
-constexpr char TARGET_PREFIX[] = "ATECH-TARGET:";
-constexpr char BUILD_PREFIX[] = "ATECH-BUILD:";
+constexpr size_t HEADER_VALUE_MAX = 160;   // the signing key (130 hex) is the longest header value
 constexpr TickType_t LOCK_WAIT = pdMS_TO_TICKS(8000);
+constexpr size_t PEM_MAX = 4096;           // one CA chain, client certificate or key
+constexpr size_t PEM_TOTAL_MAX = 10240;    // all three together: the nvs partition is 20 KiB
+constexpr size_t FIELD_MAX = 128;          // identity, username, domain
+const char CA_REFUSAL[] = "Enterprise Wi-Fi needs a trusted CA certificate (PEM) or the built-in bundle; certificate checking is never disabled";
+const char AUTH_NAMES[][9] = {"personal", "peap", "ttls", "tls"};
+// Connectivity probe: plain HTTP, redirects not followed, bounded body. A 204 (or Apple's "Success")
+// means the internet answered; a redirect or another page means a sign-in portal; nothing means offline.
+const char PROBE_PRIMARY[] = "http://connectivitycheck.gstatic.com/generate_204";
+const char PROBE_SECONDARY[] = "http://captive.apple.com/hotspot-detect.html";
+constexpr uint32_t PROBE_TIMEOUT_MS = 6000;
+constexpr uint32_t PROBE_OK_RECHECK_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t PROBE_BAD_RECHECK_MS = 60000;
+constexpr size_t PROBE_BODY_MAX = 512;
+constexpr uint32_t PROBE_TASK_STACK = 6144;
+enum class Net : uint8_t { Unknown, Checking, Ok, Captive, Offline };
+const char *netName(Net state) {
+  switch (state) {
+    case Net::Checking: return "checking";
+    case Net::Ok: return "ok";
+    case Net::Captive: return "captive";
+    case Net::Offline: return "offline";
+    default: return "unknown";
+  }
+}
+const char PHASE2_NAMES[][9] = {"eap", "mschapv2", "mschap", "pap", "chap"};
+
+bool isEnterpriseAuth(wifi_auth_mode_t mode) {
+  return mode == WIFI_AUTH_ENTERPRISE || mode == WIFI_AUTH_WPA3_ENTERPRISE || mode == WIFI_AUTH_WPA2_WPA3_ENTERPRISE ||
+         mode == WIFI_AUTH_WPA_ENTERPRISE || mode == WIFI_AUTH_WPA3_ENT_192;
+}
 
 const char HEX_DIGITS[] = "0123456789abcdef";
 
@@ -114,75 +146,6 @@ bool hmacSha256Hex(const String &key, const String &message, String &out) {
   return true;
 }
 
-// Streaming substring search with a KMP failure table so a marker is found
-// even when a partial match overlaps the real one. Markers are byte strings
-// and may contain a terminating NUL to make them exact.
-struct MarkerScanner {
-  uint8_t marker[80] = {};
-  uint8_t failure[80] = {};
-  size_t length = 0;
-  size_t matched = 0;
-  bool found = false;
-
-  void reset(const uint8_t *bytes, size_t count) {
-    length = std::min(count, sizeof(marker));
-    memcpy(marker, bytes, length);
-    matched = 0;
-    found = false;
-    failure[0] = 0;
-    size_t k = 0;
-    for (size_t i = 1; i < length; ++i) {
-      while (k > 0 && marker[i] != marker[k]) k = failure[k - 1];
-      if (marker[i] == marker[k]) ++k;
-      failure[i] = static_cast<uint8_t>(k);
-    }
-  }
-
-  void feed(const uint8_t *data, size_t count) {
-    if (found || length == 0) return;
-    for (size_t i = 0; i < count; ++i) {
-      while (matched > 0 && data[i] != marker[matched]) matched = failure[matched - 1];
-      if (data[i] == marker[matched]) {
-        ++matched;
-        if (matched == length) { found = true; return; }
-      }
-    }
-  }
-};
-
-// Finds "ATECH-TARGET:" and captures the NUL-terminated device id after it.
-struct TargetScanner {
-  MarkerScanner prefix;
-  char captured[TARGET_ID_MAX + 1] = {};
-  size_t capturedLength = 0;
-  bool complete = false;
-
-  void reset() {
-    prefix.reset(reinterpret_cast<const uint8_t *>(TARGET_PREFIX), sizeof(TARGET_PREFIX) - 1);
-    capturedLength = 0;
-    complete = false;
-    captured[0] = '\0';
-  }
-
-  void feed(const uint8_t *data, size_t count) {
-    if (complete) return;
-    size_t i = 0;
-    if (!prefix.found) {
-      // Feed byte by byte so capture starts right after the prefix.
-      for (; i < count && !prefix.found; ++i) prefix.feed(data + i, 1);
-      if (!prefix.found) return;
-    }
-    for (; i < count; ++i) {
-      if (data[i] == 0 || capturedLength >= TARGET_ID_MAX) {
-        captured[capturedLength] = '\0';
-        complete = true;
-        return;
-      }
-      captured[capturedLength++] = static_cast<char>(data[i]);
-    }
-  }
-};
-
 struct Nonce {
   uint8_t bytes[NONCE_BYTES] = {};
   uint32_t issuedMs = 0;
@@ -196,10 +159,16 @@ struct AtechWifiLan::Impl {
   String imageIdentity;
   String preferencesNamespace;
   String hostnameText;
-  String storedSsid;
-  String storedPassword;
+  AtechWifiProfile stored;
   String error;
   Preferences preferences;
+  bool sntpStarted = false;
+  // Internet probe (own task; results read from any task).
+  volatile Net netState = Net::Unknown;
+  String captiveUrlText;            // written by the probe task under lock
+  TaskHandle_t probeTask = nullptr;
+  volatile bool probeRequested = false;
+  uint32_t nextProbeMs = 0;
 
   bool initialized = false;
   bool stationWanted = false;
@@ -219,41 +188,113 @@ struct AtechWifiLan::Impl {
   uint32_t rebootAtMs = 0;
   uint32_t restartAtMs = 0;
 
-  // Upload session (guarded by lock).
+  // Upload session (guarded by lock). The bytes go through the shared install engine.
   struct Session {
     bool active = false;
     char id[SESSION_ID_BYTES * 2 + 1] = {};
     uint32_t expectedSize = 0;
     uint32_t received = 0;
-    String expectedSha;
     String buildId;
-    const esp_partition_t *partition = nullptr;
-    esp_ota_handle_t handle = 0;
-    bool handleActive = false;
-    mbedtls_sha256_context sha;
-    bool shaStarted = false;
-    uint8_t prefix[APP_PREFIX_SIZE] = {};
-    size_t prefixLength = 0;
-    bool headerOk = false;
-    MarkerScanner identity;
-    MarkerScanner build;
-    TargetScanner target;
+    String pendingKey;    // X-Atech-Key of this upload, pinned only once the sink accepted the image
     uint32_t startedMs = 0;
     uint32_t firstChunkMs = 0;
     uint32_t lastActivityMs = 0;
     uint8_t *buffer = nullptr;
   } session;
+  atech::ImageSink sink;
   bool verifiedPendingReboot = false;
   String lastTransferError;
   uint32_t lastTransferMs = 0;
 
   ~Impl() {
     abortSession("Service destroyed", false);
+    if (probeTask) vTaskDelete(probeTask);
     if (server) httpd_stop(server);
     if (lock) vSemaphoreDelete(lock);
   }
 
-  // ---- credentials -------------------------------------------------------
+  // ---- internet probe ------------------------------------------------------------------
+
+  static void probeMain(void *arg) { static_cast<Impl *>(arg)->probeLoop(); }
+
+  int fetch(const char *url, String &location, String &body) {
+    NetworkClient client;
+    HTTPClient http;
+    http.setConnectTimeout(PROBE_TIMEOUT_MS);
+    http.setTimeout(PROBE_TIMEOUT_MS);
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http.setReuse(false);
+    http.setUserAgent("AtechNet/1");
+    const char *keys[] = {"Location"};
+    http.collectHeaders(keys, 1);
+    if (!http.begin(client, url)) return -1;
+    const int code = http.GET();
+    if (code >= 300 && code < 400) location = http.header("Location");
+    if (code == 200) {
+      NetworkClient *stream = http.getStreamPtr();
+      const uint32_t start = millis();
+      char chunk[128];
+      while (stream && body.length() < PROBE_BODY_MAX && millis() - start < 2000) {
+        const int available = stream->available();
+        if (available <= 0) { if (!stream->connected()) break; vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        const int read = stream->read(reinterpret_cast<uint8_t *>(chunk), std::min<size_t>(sizeof(chunk), PROBE_BODY_MAX - body.length()));
+        if (read <= 0) break;
+        body.concat(chunk, read);
+      }
+    }
+    http.end();
+    return code;
+  }
+
+  Net probeOnce(String &location) {
+    String body;
+    int code = fetch(PROBE_PRIMARY, location, body);
+    if (code == 204) return Net::Ok;
+    if (code > 0) return Net::Captive;   // a redirect or a page instead of the empty answer
+    body = "";
+    code = fetch(PROBE_SECONDARY, location, body);
+    if (code == 200 && body.indexOf("Success") >= 0) return Net::Ok;
+    if (code > 0) return Net::Captive;
+    return Net::Offline;
+  }
+
+  void probeLoop() {
+    for (;;) {
+      if (!probeRequested || !gotIp) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
+      probeRequested = false;
+      netState = Net::Checking;
+      String location;
+      const Net result = probeOnce(location);
+      if (take()) { captiveUrlText = location; give(); }
+      netState = result;
+      Serial.printf("[wifi] internet: %s%s%s\n", netName(result), location.isEmpty() ? "" : ", sign-in page ", location.c_str());
+      nextProbeMs = millis() + (result == Net::Ok ? PROBE_OK_RECHECK_MS : PROBE_BAD_RECHECK_MS);
+    }
+  }
+
+  // ---- the stored profile ------------------------------------------------------------
+
+  String getBlob(const char *key) {
+    const size_t length = preferences.getBytesLength(key);
+    if (length == 0 || length > PEM_MAX + 1) return String();
+    char *buffer = static_cast<char *>(malloc(length + 1));
+    if (!buffer) return String();
+    const size_t read = preferences.getBytes(key, buffer, length);
+    buffer[read] = '\0';
+    String out(buffer);
+    free(buffer);
+    return out;
+  }
+
+  bool putBlob(const char *key, const String &value) {
+    if (value.isEmpty()) { preferences.remove(key); return true; }
+    return preferences.putBytes(key, value.c_str(), value.length()) == value.length();
+  }
+
+  bool putText(const char *key, const String &value) {
+    if (value.isEmpty()) { preferences.remove(key); return true; }
+    return preferences.putString(key, value) == value.length();
+  }
 
   bool loadCredentials() {
     if (!preferences.begin(preferencesNamespace.c_str(), true)) {
@@ -264,30 +305,88 @@ struct AtechWifiLan::Impl {
         return false;
       }
     }
-    storedSsid = preferences.getString("ssid", "");
-    storedPassword = preferences.getString("pass", "");
+    stored = AtechWifiProfile();
+    stored.ssid = preferences.getString("ssid", "");
+    stored.pass = preferences.getString("pass", "");
+    stored.auth = preferences.getUChar("auth", ATECH_WIFI_PERSONAL);
+    stored.identity = preferences.getString("ident", "");
+    stored.username = preferences.getString("user", "");
+    stored.domain = preferences.getString("domain", "");
+    stored.phase2 = preferences.getUChar("ph2", ATECH_TTLS_MSCHAPV2);
+    stored.caBundle = preferences.getBool("cabund", false);
+    stored.ca = getBlob("ca");
+    stored.cert = getBlob("crt");
+    stored.key = getBlob("key");
     preferences.end();
-    stationWanted = !storedSsid.isEmpty();
+    if (stored.auth > ATECH_WIFI_TLS) stored.auth = ATECH_WIFI_PERSONAL;
+    if (stored.phase2 > ATECH_TTLS_CHAP) stored.phase2 = ATECH_TTLS_MSCHAPV2;
+    stationWanted = !stored.ssid.isEmpty();
     return true;
   }
 
-  bool persistCredentials(const String &ssid, const String &password) {
+  bool persistProfile(const AtechWifiProfile &p) {
     if (!preferences.begin(preferencesNamespace.c_str(), false)) {
       error = F("Could not open Wi-Fi credential storage");
       return false;
     }
-    const bool ok = preferences.putString("ssid", ssid) == ssid.length() &&
-                    preferences.putString("pass", password) == password.length();
+    // Certificates first and the method last: a write that fails midway (storage full) leaves a
+    // profile that is empty, never "enterprise without its trust anchor". Blob lengths are read back.
+    bool ok = putBlob("ca", p.ca) && putBlob("crt", p.cert) && putBlob("key", p.key) &&
+              preferences.getBytesLength("ca") == p.ca.length() && preferences.getBytesLength("crt") == p.cert.length() &&
+              preferences.getBytesLength("key") == p.key.length();
+    ok = ok && putText("ssid", p.ssid) && putText("pass", p.pass) && putText("ident", p.identity) && putText("user", p.username) &&
+         putText("domain", p.domain) && preferences.putUChar("ph2", p.phase2) == 1 && preferences.putBool("cabund", p.caBundle) == 1 &&
+         preferences.putUChar("auth", p.auth) == 1;
+    if (!ok) {
+      for (const char *key : {"ssid", "pass", "auth", "ident", "user", "domain", "ph2", "cabund", "ca", "crt", "key"}) preferences.remove(key);
+    }
     preferences.end();
-    if (!ok) error = F("Could not persist the Wi-Fi credentials");
+    if (!ok) error = F("Could not persist the Wi-Fi profile (storage full?); nothing was kept");
     return ok;
   }
 
   bool eraseCredentials() {
     if (!preferences.begin(preferencesNamespace.c_str(), false)) return false;
-    preferences.remove("ssid");
-    preferences.remove("pass");
+    for (const char *key : {"ssid", "pass", "auth", "ident", "user", "domain", "ph2", "cabund", "ca", "crt", "key"}) preferences.remove(key);
     preferences.end();
+    return true;
+  }
+
+  // Validates a profile the way every provisioning path (Bluetooth, hotspot page) relies on; the
+  // texts are shared with builder/lib/fake-prov-board.js.
+  bool validateProfile(AtechWifiProfile &p) {
+    if (p.ssid.isEmpty() || p.ssid.length() > 32) { error = F("SSID must contain 1 to 32 characters"); return false; }
+    if (p.auth > ATECH_WIFI_TLS) { error = F("Unknown Wi-Fi security method"); return false; }
+    if (p.auth == ATECH_WIFI_PERSONAL) {
+      if (!p.pass.isEmpty() && (p.pass.length() < 8 || p.pass.length() > 63)) {
+        error = F("Wi-Fi password must contain 8 to 63 characters (or be empty for an open network)");
+        return false;
+      }
+      p.identity = ""; p.username = ""; p.ca = ""; p.cert = ""; p.key = ""; p.domain = ""; p.phase2 = ATECH_TTLS_MSCHAPV2; p.caBundle = false;
+      return true;
+    }
+    if (p.ca.isEmpty() && !p.caBundle) { error = CA_REFUSAL; return false; }
+    if (!p.ca.isEmpty() && !p.ca.startsWith("-----BEGIN")) { error = F("The CA certificate is not PEM"); return false; }
+    if ((p.auth == ATECH_WIFI_PEAP || p.auth == ATECH_WIFI_TTLS) && (p.username.isEmpty() || p.pass.isEmpty())) {
+      error = F("PEAP and TTLS need a username and password");
+      return false;
+    }
+    if (p.auth == ATECH_WIFI_TLS) {
+      if (p.cert.isEmpty() || p.key.isEmpty()) { error = F("EAP-TLS needs a client certificate and its private key"); return false; }
+      if (p.identity.isEmpty()) { error = F("EAP-TLS needs an identity (usually the certificate subject)"); return false; }
+      if (!p.cert.startsWith("-----BEGIN") || !p.key.startsWith("-----BEGIN")) { error = F("The client certificate or key is not PEM"); return false; }
+      p.pass = "";
+    } else {
+      p.cert = ""; p.key = "";
+    }
+    if (p.auth != ATECH_WIFI_TTLS) p.phase2 = ATECH_TTLS_MSCHAPV2;
+    if (p.phase2 > ATECH_TTLS_CHAP) { error = F("Unknown TTLS phase 2 method"); return false; }
+    if (p.ca.length() > PEM_MAX || p.cert.length() > PEM_MAX || p.key.length() > PEM_MAX) { error = F("A certificate or key is too long (4 KiB limit)"); return false; }
+    if (p.ca.length() + p.cert.length() + p.key.length() > PEM_TOTAL_MAX) { error = F("Certificates and key together exceed 10 KiB; use a shorter CA chain or the built-in bundle"); return false; }
+    if (p.identity.length() > FIELD_MAX || p.username.length() > FIELD_MAX || p.domain.length() > FIELD_MAX || p.pass.length() > FIELD_MAX) {
+      error = F("Identity, username, password and server name are at most 128 characters");
+      return false;
+    }
     return true;
   }
 
@@ -301,6 +400,43 @@ struct AtechWifiLan::Impl {
     WiFi.mode(mode);
   }
 
+  // Associates with the stored profile. Enterprise methods validate the authentication server
+  // against the CA or the built-in bundle (and the expected name when one is set); only the
+  // certificate validity window is skipped, because the board has no clock before its first network.
+  void connectStation() {
+    if (stored.auth == ATECH_WIFI_PERSONAL) {
+      WiFi.setMinSecurity(stored.pass.isEmpty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK);
+      WiFi.begin(stored.ssid.c_str(), stored.pass.isEmpty() ? nullptr : stored.pass.c_str());
+      return;
+    }
+    // The invariant every provisioning path enforces at save time holds at connect time too: an
+    // enterprise profile with neither a CA nor the bundle (a damaged or foreign NVS) never associates,
+    // because the supplicant would then skip server certificate validation.
+    if (stored.ca.isEmpty() && !stored.caBundle) {
+      error = F("Stored enterprise profile has no trust anchor; not joining");
+      Serial.println(F("[wifi] enterprise profile has no trust anchor; not joining (set the CA or the bundle on the board page)"));
+      stationWanted = false;
+      return;
+    }
+#if defined(ATECH_HAS_EAP) && defined(CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT)
+    esp_eap_client_set_disable_time_check(true);
+    // The server certificate is validated against the given CA or the built-in bundle; a CA left over
+    // from a previous profile is cleared so the bundle choice is the only trust anchor.
+    if (stored.caBundle) esp_eap_client_clear_ca_cert();
+    else esp_eap_client_set_ca_cert(reinterpret_cast<const unsigned char *>(stored.ca.c_str()), stored.ca.length());
+    esp_eap_client_use_default_cert_bundle(stored.caBundle);
+    esp_eap_client_set_domain_name(stored.domain.isEmpty() ? nullptr : stored.domain.c_str());
+    const wpa2_auth_method_t method = stored.auth == ATECH_WIFI_TLS ? WPA2_AUTH_TLS : stored.auth == ATECH_WIFI_TTLS ? WPA2_AUTH_TTLS : WPA2_AUTH_PEAP;
+    const String identity = stored.identity.isEmpty() ? stored.username : stored.identity;
+    WiFi.setMinSecurity(WIFI_AUTH_WPA2_ENTERPRISE);
+    WiFi.begin(stored.ssid.c_str(), method, identity.c_str(), stored.username.c_str(), stored.pass.c_str(),
+               stored.ca.isEmpty() ? nullptr : stored.ca.c_str(), stored.cert.isEmpty() ? nullptr : stored.cert.c_str(),
+               stored.key.isEmpty() ? nullptr : stored.key.c_str(), stored.auth == ATECH_WIFI_TTLS ? static_cast<int>(stored.phase2) : -1);
+#else
+    Serial.println(F("[wifi] this build has no enterprise Wi-Fi support"));
+#endif
+  }
+
   void startStation() {
     if (!stationWanted) return;
     WiFi.persistent(false);
@@ -308,10 +444,9 @@ struct AtechWifiLan::Impl {
     applyMode();
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
-    WiFi.setMinSecurity(storedPassword.isEmpty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK);
     lastAttemptMs = millis();
-    WiFi.begin(storedSsid.c_str(), storedPassword.isEmpty() ? nullptr : storedPassword.c_str());
-    Serial.printf("[wifi] joining \"%s\" as %s\n", storedSsid.c_str(), hostnameText.c_str());
+    connectStation();
+    Serial.printf("[wifi] joining \"%s\" (%s) as %s\n", stored.ssid.c_str(), AUTH_NAMES[stored.auth], hostnameText.c_str());
   }
 
   void onEvent(arduino_event_id_t event, const arduino_event_info_t &info) {
@@ -320,12 +455,16 @@ struct AtechWifiLan::Impl {
         gotIp = true;
         servicesPending = true;
         connectedAtMs = millis();
+        probeRequested = true;
+        nextProbeMs = 0;
         break;
       case ARDUINO_EVENT_WIFI_STA_LOST_IP:
         gotIp = false;
+        netState = Net::Unknown;
         break;
       case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
         gotIp = false;
+        netState = Net::Unknown;
         lastDisconnectMs = millis();
         lastDisconnectReason = info.wifi_sta_disconnected.reason;
         break;
@@ -334,21 +473,27 @@ struct AtechWifiLan::Impl {
     }
   }
 
+  bool ensureMdns() {
+    if (mdnsStarted) return true;
+    if (!MDNS.begin(hostnameText.c_str())) {
+      Serial.println(F("[wifi] mDNS did not start; discovery falls back to manual IP"));
+      return false;
+    }
+    MDNS.addService("atech-ota", "tcp", config.port);
+    MDNS.addServiceTxt("atech-ota", "tcp", "id", atech::deviceId());
+    MDNS.addServiceTxt("atech-ota", "tcp", "suffix", atech::pairingSuffix());
+    MDNS.addServiceTxt("atech-ota", "tcp", "demo", String(config.demo).c_str());
+    MDNS.addServiceTxt("atech-ota", "tcp", "fw", config.firmwareVersion ? config.firmwareVersion : "");
+    MDNS.addServiceTxt("atech-ota", "tcp", "proto", PROTOCOL_VERSION);
+    mdnsStarted = true;
+    return true;
+  }
+
   void startServices() {
     servicesPending = false;
-    if (!mdnsStarted) {
-      if (MDNS.begin(hostnameText.c_str())) {
-        MDNS.addService("atech-ota", "tcp", config.port);
-        MDNS.addServiceTxt("atech-ota", "tcp", "id", atech::deviceId());
-        MDNS.addServiceTxt("atech-ota", "tcp", "suffix", atech::pairingSuffix());
-        MDNS.addServiceTxt("atech-ota", "tcp", "demo", String(config.demo).c_str());
-        MDNS.addServiceTxt("atech-ota", "tcp", "fw", config.firmwareVersion ? config.firmwareVersion : "");
-        MDNS.addServiceTxt("atech-ota", "tcp", "proto", PROTOCOL_VERSION);
-        mdnsStarted = true;
-      } else {
-        Serial.println(F("[wifi] mDNS did not start; discovery falls back to manual IP"));
-      }
-    }
+    ensureMdns();
+    // Time for TLS certificate validity checks (cloud agent, future EAP sessions).
+    if (!sntpStarted) { configTime(0, 0, "pool.ntp.org", "time.google.com"); sntpStarted = true; }
     if (!serverStarted) startServer();
     Serial.printf("[wifi] connected to \"%s\": http://%s:%u (%s.local)\n", WiFi.SSID().c_str(),
                   WiFi.localIP().toString().c_str(), config.port, hostnameText.c_str());
@@ -458,7 +603,15 @@ struct AtechWifiLan::Impl {
     json += F("{\"enabled\":");
     json += stationWanted ? F("true") : F("false");
     json += F(",\"configured_ssid\":\"");
-    json += jsonEscape(storedSsid);
+    json += jsonEscape(stored.ssid);
+    json += F("\",\"auth\":\"");
+    json += AUTH_NAMES[stored.auth];
+    json += F("\",\"internet\":\"");
+    json += netName(netState);
+    json += F("\",\"captive_url\":\"");
+    json += jsonEscape(captiveUrlText);
+    json += F("\",\"mac\":\"");
+    json += WiFi.macAddress();
     json += F("\",\"connected\":");
     json += (stationWanted && gotIp) ? F("true") : F("false");
     json += F(",\"ssid\":\"");
@@ -504,6 +657,13 @@ struct AtechWifiLan::Impl {
       const String sync = config.syncIdentity();
       if (sync.startsWith("{")) { identity += F(",\"sync\":"); identity += sync; }
     }
+    if (config.transportIdentity) {
+      const String transport = config.transportIdentity();
+      if (transport.startsWith("{")) { identity += F(",\"transport\":"); identity += transport; }
+    }
+    // The signing state (key id, highest confirmed app version) so the dashboard can foresee a downgrade.
+    identity += F(",\"sign\":");
+    identity += atech::fwsign::statusJson();
     identity += F("}");
     return identity;
   }
@@ -511,25 +671,18 @@ struct AtechWifiLan::Impl {
   // ---- upload session ---------------------------------------------------------
 
   void releaseSessionResources() {
-    if (session.handleActive) {
-      esp_ota_abort(session.handle);
-      session.handleActive = false;
-      session.handle = 0;
-    }
-    if (session.shaStarted) {
-      mbedtls_sha256_free(&session.sha);
-      session.shaStarted = false;
-    }
+    sink.abort();
     if (session.buffer) {
       free(session.buffer);
       session.buffer = nullptr;
     }
     session.active = false;
+    session.pendingKey = String();
     session.id[0] = '\0';
   }
 
   void abortSession(const String &message, bool resumeApp = true) {
-    if (!session.active && !session.handleActive) return;
+    if (!session.active && !sink.active()) return;
     releaseSessionResources();
     lastTransferError = message;
     atech::coreReleaseOta("lan");
@@ -538,50 +691,6 @@ struct AtechWifiLan::Impl {
 #endif
     if (resumeApp) atech::coreResumeApp();
     Serial.printf("[lan-ota] aborted: %s\n", message.c_str());
-  }
-
-  bool validatePrefix(String &reason) {
-    esp_image_header_t imageHeader = {};
-    memcpy(&imageHeader, session.prefix, sizeof(imageHeader));
-    if (imageHeader.magic != ESP_IMAGE_HEADER_MAGIC) { reason = F("Not an ESP application image (bad magic byte)"); return false; }
-    if (imageHeader.segment_count == 0 || imageHeader.segment_count > ESP_IMAGE_MAX_SEGMENTS) {
-      reason = F("Invalid ESP application segment count");
-      return false;
-    }
-    if (imageHeader.chip_id != ESP_CHIP_ID_ESP32S3) { reason = F("Firmware target is not ESP32-S3"); return false; }
-    if (imageHeader.spi_size != ESP_IMAGE_FLASH_SIZE_16MB) { reason = F("Firmware flash target is not the configured 16MB board"); return false; }
-    uint32_t descriptorMagic = 0;
-    memcpy(&descriptorMagic, session.prefix + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t), sizeof(descriptorMagic));
-    if (descriptorMagic != ESP_APP_DESC_MAGIC_WORD) {
-      reason = F("Image is not an application firmware.bin (bootloader/merged images are rejected)");
-      return false;
-    }
-    return true;
-  }
-
-  // Consumes received bytes: integrity, markers, header check, flash write.
-  bool consume(const uint8_t *data, size_t length, String &reason) {
-    if (mbedtls_sha256_update(&session.sha, data, length) != 0) { reason = F("SHA-256 update failed"); return false; }
-    session.identity.feed(data, length);
-    session.build.feed(data, length);
-    session.target.feed(data, length);
-    if (!session.headerOk) {
-      const size_t toCopy = std::min(length, APP_PREFIX_SIZE - session.prefixLength);
-      memcpy(session.prefix + session.prefixLength, data, toCopy);
-      session.prefixLength += toCopy;
-      if (session.prefixLength == APP_PREFIX_SIZE && !validatePrefix(reason)) return false;
-      if (session.prefixLength == APP_PREFIX_SIZE) session.headerOk = true;
-      else return true;  // still accumulating the header; nothing written yet
-      // Write the prefix now that it is known to be an application image.
-      const esp_err_t prefixResult = esp_ota_write(session.handle, session.prefix, APP_PREFIX_SIZE);
-      if (prefixResult != ESP_OK) { reason = String(F("Flash write failed: ")) + esp_err_to_name(prefixResult); return false; }
-      data += toCopy;
-      length -= toCopy;
-      if (length == 0) return true;
-    }
-    const esp_err_t result = esp_ota_write(session.handle, data, length);
-    if (result != ESP_OK) { reason = String(F("Flash write failed: ")) + esp_err_to_name(result); return false; }
-    return true;
   }
 
   // ---- handlers ------------------------------------------------------------------
@@ -647,6 +756,24 @@ struct AtechWifiLan::Impl {
     message += build; message += '\n';
     if (!verifyAuth(message, auth)) return sendError(req, 401, F("Authorization failed; pair the backend with this board's OTA authorization code"));
 
+    // The signed manifest (shared/AtechFwSign): the backend signs build, demo, size, digest, version,
+    // downgrade flag and this board's id; the sink verifies it at finish. The HMAC above proves the
+    // backend holds the pairing token, so the first signing key may be pinned here.
+    String signature = header(req, "X-Atech-Sig");
+    signature.toLowerCase();
+    String target = header(req, "X-Atech-Target");
+    target.trim();
+    target.toUpperCase();
+    uint32_t version = 0;
+    if (!signature.isEmpty()) {
+      if (!isHex(signature, 128)) return sendError(req, 400, F("Invalid firmware signature"));
+      if (!parseUnsigned(header(req, "X-Atech-Version"), version)) return sendError(req, 400, F("Missing or invalid firmware version"));
+      if (!target.isEmpty() && target != atech::deviceId()) return sendError(req, 403, String(F("This upload is signed for ")) + target + F(", not this board"));
+    }
+    // The key rides with the upload and is pinned in finish(), after the sink accepted the image.
+    String pendingKey = header(req, "X-Atech-Key");
+    pendingKey.toLowerCase();
+
     if (rebootAtMs != 0 || verifiedPendingReboot) return sendError(req, 409, F("A verified update is rebooting"));
     if (session.active) {
       if (millis() - session.lastActivityMs < config.sessionTimeoutMs) return sendError(req, 409, F("Another LAN upload is in progress"));
@@ -656,16 +783,6 @@ struct AtechWifiLan::Impl {
     if (!atech::coreTryAcquireOta("lan")) {
       return sendError(req, 409, String(F("Flash is owned by the ")) + atech::coreOtaOwner() + F(" updater"));
     }
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
-    if (!target || target == running) {
-      atech::coreReleaseOta("lan");
-      return sendError(req, 500, F("No inactive OTA application partition is available"));
-    }
-    if (size > target->size) {
-      atech::coreReleaseOta("lan");
-      return sendError(req, 413, String(F("Firmware is larger than the inactive OTA slot (")) + String(target->size) + F(" bytes)"));
-    }
     session.buffer = static_cast<uint8_t *>(heap_caps_malloc(RECV_BUFFER_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (!session.buffer) session.buffer = static_cast<uint8_t *>(malloc(RECV_BUFFER_BYTES));
     if (!session.buffer) {
@@ -673,29 +790,31 @@ struct AtechWifiLan::Impl {
       return sendError(req, 500, F("Could not allocate the receive buffer"));
     }
     const uint32_t eraseStart = millis();
-    const esp_err_t beginResult = esp_ota_begin(target, size, &session.handle);
-    if (beginResult != ESP_OK) {
+    String reason;
+    if (!sink.begin(size, sha, build, imageIdentity, reason)) {
       free(session.buffer);
       session.buffer = nullptr;
       atech::coreReleaseOta("lan");
-      return sendError(req, 500, String(F("Could not begin inactive-partition update: ")) + esp_err_to_name(beginResult));
+      return sendError(req, reason.startsWith("Firmware is larger") ? 413 : reason.startsWith("Could not") ? 500 : 400, reason);
     }
     const uint32_t eraseMs = millis() - eraseStart;
-    session.handleActive = true;
-    session.partition = target;
+    if (!signature.isEmpty()) {
+      atech::fwsign::Manifest manifest;
+      manifest.build = build;
+      manifest.demo = config.demo;
+      manifest.size = size;
+      manifest.sha256 = sha;
+      manifest.version = version;
+      manifest.downgrade = header(req, "X-Atech-Downgrade") == "1";
+      manifest.target = target;
+      manifest.signature = signature;
+      if (!atech::fwsign::hasKey()) manifest.candidateKey = pendingKey;
+      sink.setManifest(manifest);
+    }
     session.expectedSize = size;
     session.received = 0;
-    session.expectedSha = sha;
     session.buildId = build;
-    session.prefixLength = 0;
-    session.headerOk = false;
-    mbedtls_sha256_init(&session.sha);
-    mbedtls_sha256_starts(&session.sha, 0);
-    session.shaStarted = true;
-    session.identity.reset(reinterpret_cast<const uint8_t *>(imageIdentity.c_str()), imageIdentity.length());
-    String buildMarker = String(BUILD_PREFIX) + build;
-    session.build.reset(reinterpret_cast<const uint8_t *>(buildMarker.c_str()), buildMarker.length() + 1);  // include NUL
-    session.target.reset();
+    session.pendingKey = pendingKey;
     uint8_t idBytes[SESSION_ID_BYTES];
     esp_fill_random(idBytes, sizeof(idBytes));
     const String idHex = hexEncode(idBytes, sizeof(idBytes));
@@ -710,16 +829,17 @@ struct AtechWifiLan::Impl {
 #ifdef ATECH_HAS_COEX
     esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
 #endif
-    Serial.printf("[lan-ota] session %s: %lu bytes into %s (erase %lu ms) build %s\n", session.id,
-                  static_cast<unsigned long>(size), target->label, static_cast<unsigned long>(eraseMs), build.c_str());
+    Serial.printf("[lan-ota] session %s: %lu bytes into %s (erase %lu ms) build %s (%s)\n", session.id,
+                  static_cast<unsigned long>(size), sink.partitionLabel(), static_cast<unsigned long>(eraseMs), build.c_str(),
+                  signature.isEmpty() ? "unsigned" : "signed");
     String body = F("{\"ok\":true,\"session\":\"");
     body += session.id;
     body += F("\",\"chunk_max\":");
     body += String(CHUNK_MAX_BYTES);
     body += F(",\"partition\":\"");
-    body += target->label;
+    body += sink.partitionLabel();
     body += F("\",\"slot_size\":");
-    body += String(target->size);
+    body += String(sink.partitionSize());
     body += F(",\"erase_ms\":");
     body += String(eraseMs);
     body += F("}");
@@ -763,11 +883,11 @@ struct AtechWifiLan::Impl {
         continue;
       }
       if (read <= 0) { abortSession(F("Connection lost during upload; incomplete image discarded")); return ESP_FAIL; }
-      if (!consume(session.buffer, static_cast<size_t>(read), reason)) {
+      if (!sink.write(session.buffer, static_cast<size_t>(read), reason)) {
         abortSession(reason);
         return sendError(req, 422, reason, true);
       }
-      session.received += static_cast<uint32_t>(read);
+      session.received = sink.received();
       remaining -= static_cast<size_t>(read);
       session.lastActivityMs = millis();
     }
@@ -794,55 +914,25 @@ struct AtechWifiLan::Impl {
       abortSession(reason);
       return sendError(req, 422, reason);
     }
-    if (!session.headerOk) { abortSession(F("Application header was never validated")); return sendError(req, 422, F("Application header was never validated")); }
-    if (!session.identity.found) {
-      abortSession(F("Firmware belongs to a different Atech demo/target"));
-      return sendError(req, 422, F("Firmware belongs to a different Atech demo/target"));
-    }
-    if (!session.build.found) {
-      const String reason = String(F("Image does not carry build id ")) + session.buildId;
-      abortSession(reason);
-      return sendError(req, 422, reason);
-    }
-    if (session.target.complete && session.target.capturedLength > 0 &&
-        strcmp(session.target.captured, atech::deviceId()) != 0) {
-      const String reason = String(F("Image was built for ")) + session.target.captured + F(", not this board");
-      abortSession(reason);
-      return sendError(req, 422, reason);
-    }
-    uint8_t digest[32] = {};
-    if (mbedtls_sha256_finish(&session.sha, digest) != 0) { abortSession(F("SHA-256 finalization failed")); return sendError(req, 500, F("SHA-256 finalization failed")); }
-    mbedtls_sha256_free(&session.sha);
-    session.shaStarted = false;
-    const String actualSha = hexEncode(digest, sizeof(digest));
-    if (!constantTimeEquals(actualSha, session.expectedSha)) {
-      abortSession(F("Image SHA-256 does not match the declared digest; inactive partition not selected"));
-      return sendError(req, 422, F("Image SHA-256 does not match the declared digest"));
-    }
     const uint32_t transferMs = session.firstChunkMs ? millis() - session.firstChunkMs : 0;
-    // esp_ota_end validates the ESP image (checksum, appended hash, and when
-    // enabled secure boot / anti-rollback). It never selects the image.
+    // Markers, digest, signature, version policy, ESP image validation and slot selection: the sink
+    // selects the slot only when every check passed, exactly as on the cloud and hotspot paths.
     const uint32_t verifyStart = millis();
-    const esp_err_t validation = esp_ota_end(session.handle);
-    session.handleActive = false;
-    session.handle = 0;
-    if (validation != ESP_OK) {
-      const String reason = String(F("ESP image verification failed: ")) + esp_err_to_name(validation);
+    String reason;
+    if (!sink.finish(reason)) {
       abortSession(reason);
       return sendError(req, 422, reason);
     }
-    const esp_err_t activation = esp_ota_set_boot_partition(session.partition);
-    if (activation != ESP_OK) {
-      const String reason = String(F("Verified image could not be selected: ")) + esp_err_to_name(activation);
-      abortSession(reason);
-      return sendError(req, 500, reason);
-    }
+    if (!session.pendingKey.isEmpty() && !atech::fwsign::hasKey()) atech::fwsign::pinKey(session.pendingKey, "lan");
+    session.pendingKey = String();
+    const String actualSha = sink.digestHex();
     const uint32_t verifyMs = millis() - verifyStart;
     lastTransferMs = transferMs;
     lastTransferError = "";
-    const String partitionLabel = session.partition->label;
+    const String partitionLabel = sink.partitionLabel();
     // Keep the flash lock and the suspended app until the restart.
     session.active = false;
+    session.pendingKey = String();
     session.id[0] = '\0';
     if (session.buffer) { free(session.buffer); session.buffer = nullptr; }
     verifiedPendingReboot = true;
@@ -1023,12 +1113,16 @@ struct AtechWifiLan::Impl {
       ESP.restart();
     }
     if (servicesPending) startServices();
+    if (gotIp && netState != Net::Checking && nextProbeMs != 0 && static_cast<int32_t>(now - nextProbeMs) >= 0 && !probeRequested) {
+      probeRequested = true;
+      nextProbeMs = 0;
+    }
     if (stationWanted && !gotIp && !apActiveScanGuard() &&
         now - lastAttemptMs >= config.reconnectIntervalMs) {
       lastAttemptMs = now;
-      Serial.printf("[wifi] not connected (reason %d); retrying \"%s\"\n", lastDisconnectReason, storedSsid.c_str());
+      Serial.printf("[wifi] not connected (reason %d); retrying \"%s\"\n", lastDisconnectReason, stored.ssid.c_str());
       WiFi.disconnect(false, false, 0);
-      WiFi.begin(storedSsid.c_str(), storedPassword.isEmpty() ? nullptr : storedPassword.c_str());
+      connectStation();
     }
     if (session.active && tryTake()) {
       if (now - session.lastActivityMs >= config.sessionTimeoutMs) {
@@ -1064,6 +1158,10 @@ bool AtechWifiLan::begin(const AtechWifiLanConfig &config) {
   if (!_impl->loadCredentials()) return false;
   Impl *impl = _impl;
   WiFi.onEvent([impl](arduino_event_id_t event, arduino_event_info_t info) { impl->onEvent(event, info); });
+  if (xTaskCreatePinnedToCore(Impl::probeMain, "atech_net", PROBE_TASK_STACK, impl, 1, &impl->probeTask, 0) != pdPASS) {
+    impl->probeTask = nullptr;
+    Serial.println(F("[wifi] internet probe task did not start; reachability stays unknown"));
+  }
   _impl->initialized = true;
   if (_impl->stationWanted) {
     _impl->startStation();
@@ -1075,18 +1173,22 @@ bool AtechWifiLan::begin(const AtechWifiLanConfig &config) {
 
 void AtechWifiLan::loop() { if (_impl) _impl->service(); }
 
-bool AtechWifiLan::hasCredentials() const { return _impl && !_impl->storedSsid.isEmpty(); }
+bool AtechWifiLan::hasCredentials() const { return _impl && !_impl->stored.ssid.isEmpty(); }
 
 bool AtechWifiLan::saveCredentials(const String &ssid, const String &password) {
+  AtechWifiProfile profile;
+  profile.ssid = ssid;
+  profile.pass = password;
+  return saveProfile(profile);
+}
+
+bool AtechWifiLan::saveProfile(const AtechWifiProfile &input) {
   if (!_impl || !_impl->initialized) return false;
-  if (ssid.isEmpty() || ssid.length() > 32) { _impl->error = F("SSID must contain 1 to 32 characters"); return false; }
-  if (!password.isEmpty() && (password.length() < 8 || password.length() > 63)) {
-    _impl->error = F("Wi-Fi password must contain 8 to 63 characters (or be empty for an open network)");
-    return false;
-  }
-  if (!_impl->persistCredentials(ssid, password)) return false;
-  _impl->storedSsid = ssid;
-  _impl->storedPassword = password;
+  AtechWifiProfile profile = input;
+  if (!_impl->validateProfile(profile)) return false;
+  if (!_impl->persistProfile(profile)) return false;
+  WiFi.disconnect(false, false, 0);
+  _impl->stored = profile;
   _impl->stationWanted = true;
   _impl->gotIp = false;
   _impl->lastDisconnectReason = 0;
@@ -1094,11 +1196,34 @@ bool AtechWifiLan::saveCredentials(const String &ssid, const String &password) {
   return true;
 }
 
+AtechWifiProfile AtechWifiLan::profile() const {
+  AtechWifiProfile copy;
+  if (!_impl) return copy;
+  copy = _impl->stored;
+  copy.pass = "";
+  copy.key = "";
+  return copy;
+}
+
+uint8_t AtechWifiLan::authMethod() const { return _impl ? _impl->stored.auth : ATECH_WIFI_PERSONAL; }
+const char *AtechWifiLan::authName() const { return AUTH_NAMES[authMethod()]; }
+const char *AtechWifiLan::authName(uint8_t auth) { return auth <= ATECH_WIFI_TLS ? AUTH_NAMES[auth] : "unknown"; }
+bool AtechWifiLan::parseAuth(const String &text, uint8_t &auth) {
+  if (text.isEmpty()) { auth = ATECH_WIFI_PERSONAL; return true; }
+  for (uint8_t i = 0; i <= ATECH_WIFI_TLS; ++i) if (text == AUTH_NAMES[i]) { auth = i; return true; }
+  return false;
+}
+const char *AtechWifiLan::phase2Name(uint8_t phase2) { return phase2 <= ATECH_TTLS_CHAP ? PHASE2_NAMES[phase2] : "unknown"; }
+bool AtechWifiLan::parsePhase2(const String &text, uint8_t &phase2) {
+  if (text.isEmpty()) { phase2 = ATECH_TTLS_MSCHAPV2; return true; }
+  for (uint8_t i = 0; i <= ATECH_TTLS_CHAP; ++i) if (text == PHASE2_NAMES[i]) { phase2 = i; return true; }
+  return false;
+}
+
 bool AtechWifiLan::forgetCredentials() {
   if (!_impl || !_impl->initialized) return false;
   if (!_impl->eraseCredentials()) return false;
-  _impl->storedSsid = "";
-  _impl->storedPassword = "";
+  _impl->stored = AtechWifiProfile();
   _impl->stationWanted = false;
   _impl->gotIp = false;
   WiFi.disconnect(false, true);
@@ -1108,13 +1233,23 @@ bool AtechWifiLan::forgetCredentials() {
   return true;
 }
 
-String AtechWifiLan::configuredSsid() const { return _impl ? _impl->storedSsid : String(); }
+String AtechWifiLan::configuredSsid() const { return _impl ? _impl->stored.ssid : String(); }
 int AtechWifiLan::lastDisconnectReason() const { return _impl ? _impl->lastDisconnectReason : 0; }
 bool AtechWifiLan::isConnected() const { return _impl && _impl->stationWanted && _impl->gotIp; }
 bool AtechWifiLan::stationEnabled() const { return _impl && _impl->stationWanted; }
 IPAddress AtechWifiLan::ip() const { return isConnected() ? WiFi.localIP() : IPAddress(); }
 int AtechWifiLan::rssi() const { return isConnected() ? WiFi.RSSI() : 0; }
 String AtechWifiLan::hostname() const { return _impl ? _impl->hostnameText : String(); }
+String AtechWifiLan::stationMac() const { return WiFi.macAddress(); }
+const char *AtechWifiLan::internetState() const { return _impl ? netName(_impl->netState) : "unknown"; }
+String AtechWifiLan::captiveUrl() const {
+  if (!_impl || !_impl->tryTake()) return String();
+  const String copy = _impl->captiveUrlText;
+  _impl->give();
+  return copy;
+}
+void AtechWifiLan::recheckInternet() { if (_impl) { _impl->probeRequested = true; _impl->nextProbeMs = 0; } }
+bool AtechWifiLan::ensureMdns() { return _impl && _impl->initialized && _impl->ensureMdns(); }
 uint16_t AtechWifiLan::port() const { return _impl ? _impl->config.port : 0; }
 String AtechWifiLan::statusJson() const { return _impl ? _impl->netJson() : String("{}"); }
 
@@ -1139,6 +1274,7 @@ String AtechWifiLan::scanJson() {
       if (WiFi.SSID(j) == ssid && WiFi.RSSI(j) > bestRssi) { bestRssi = WiFi.RSSI(j); bestChannel = WiFi.channel(j); auth = WiFi.encryptionType(j); }
     }
     if (emitted++) json += ',';
+    const bool enterprise = isEnterpriseAuth(auth);
     json += F("{\"ssid\":\"");
     json += jsonEscape(ssid);
     json += F("\",\"rssi\":");
@@ -1147,7 +1283,11 @@ String AtechWifiLan::scanJson() {
     json += String(bestChannel);
     json += F(",\"open\":");
     json += auth == WIFI_AUTH_OPEN ? F("true") : F("false");
-    json += '}';
+    json += F(",\"enterprise\":");
+    json += enterprise ? F("true") : F("false");
+    json += F(",\"auth\":\"");
+    json += auth == WIFI_AUTH_OPEN ? "open" : enterprise ? "enterprise" : "personal";
+    json += F("\"}");
   }
   json += ']';
   WiFi.scanDelete();
@@ -1173,7 +1313,8 @@ String AtechWifiLan::scanLines(size_t maxNetworks) {
     for (int16_t j = i + 1; j < count; ++j) {
       if (WiFi.SSID(j) == ssid && WiFi.RSSI(j) > bestRssi) { bestRssi = WiFi.RSSI(j); auth = WiFi.encryptionType(j); }
     }
-    lines += ssid; lines += '\t'; lines += String(bestRssi); lines += '\t'; lines += auth == WIFI_AUTH_OPEN ? '1' : '0'; lines += '\n';
+    lines += ssid; lines += '\t'; lines += String(bestRssi); lines += '\t'; lines += auth == WIFI_AUTH_OPEN ? '1' : '0';
+    lines += '\t'; lines += isEnterpriseAuth(auth) ? '1' : '0'; lines += '\n';
     ++emitted;
   }
   WiFi.scanDelete();

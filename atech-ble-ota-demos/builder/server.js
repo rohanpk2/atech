@@ -25,6 +25,11 @@ const installerModule = require('./lib/installer');
 const {selectProvider} = require('./lib/generate');
 const {runPio} = require('./lib/pio');
 const {redactSecrets} = require('./lib/redact');
+const {createSigner, manifestFor, packageHeader, buildPackage} = require('./lib/signing');
+const {validateImage} = require('./lib/image');
+const {AGENT_MARKER, PROV_MARKER, SIGN_MARKER} = require('./lib/jobs');
+const {sha256Hex} = require('./lib/lan-auth');
+const {DEVICE_ID} = require('./lib/devices');
 
 const MAX_BODY = 64 * 1024;
 const MIME = {
@@ -121,16 +126,19 @@ function deploymentFinished(deployment) {
 }
 
 function createServer({config, jobs, devices = null, deployments = null, cloud = null, cloudDeployments = null, installer = installerModule,
-                       pioVersion = null, simulated = [], log = () => {}}) {
+                       pioVersion = null, simulated = [], signer = null, log = () => {}}) {
   const handlers = [];
+  // One firmware signing key per backend; its public half is baked into every image this backend builds.
+  signer = signer || createSigner({file: config.signingKeyFile});
+  config.signingPublicKey = signer.publicKeyHex();
   const route = (method, pattern, handler) => handlers.push({method, pattern, handler});
   // Base image builds run in the background; the status route reports them (see installer.js).
   const baseBuilds = installerModule.createBaseBuildTracker({ensure: (demo, options) => installer.ensureBaseBuild(demo, options)});
   devices = devices || new DeviceRegistry({config});
-  deployments = deployments || new DeploymentStore({config, jobs, devices});
+  deployments = deployments || new DeploymentStore({config, jobs, devices, signer});
   cloud = cloud || new CloudDeviceService({config, devices, log});
-  cloudDeployments = cloudDeployments || new CloudDeploymentStore({config, jobs, devices, cloud, log});
-  const deviceHandler = createDeviceHandler({cloud, cloudDeployments});
+  cloudDeployments = cloudDeployments || new CloudDeploymentStore({config, jobs, devices, cloud, signer, log});
+  const deviceHandler = createDeviceHandler({cloud, cloudDeployments, signer});
   let lastRefreshAt = 0;
   let refreshPromise = null;
   const forbidden = res => sendJson(res, 403, {error: 'This board belongs to another dashboard user'});
@@ -156,6 +164,7 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
       cloud: {publicUrl: config.publicUrl, pollMs: config.cloud.pollMs, jobTtlMs: config.cloud.jobTtlMs, offlineAfterMs: config.cloud.offlineAfterMs,
               devicePath: '/api/device/'},
       keyRequired: Boolean(config.dashboardKey),
+      signing: {keyId: signer.keyId(), publicKey: signer.publicKeyHex()},
     });
   });
 
@@ -203,6 +212,21 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
       if (!/^[0-9a-f]{64}$/.test(transcript)) throw new CloudError(400, 'bad_request', 'transcript must be 64 hex characters');
       sendJson(res, 200, {grant: provisionGrantHex(record.secret, {deviceId: id, nonce, transcript})});
     } catch (error) { sendCloudError(res, error); }
+  });
+
+  // The board's hotspot credentials and authorization code for a local update: the owner only. The
+  // board reports its hotspot once per cloud login; the code is the pairing token on file.
+  route('GET', /^\/api\/devices\/(ATECH-[0-9A-F]{12})\/local-credentials$/, async (req, res, [id]) => {
+    const record = devices.get(id);
+    if (!record) { sendJson(res, 404, {error: `Unknown device ${id}`}); return; }
+    if (!devices.canAccess(id, principalOf(req, config))) { forbidden(res); return; }
+    if (!record.hotspot || !record.hotspot.ssid) {
+      sendJson(res, 409, {error: 'The board has not reported its hotspot yet. Its serial console prints the hotspot name, password and authorization code at boot.'});
+      return;
+    }
+    if (!record.secret) { sendJson(res, 409, {error: `${id} is not claimed; its authorization code is not on file`}); return; }
+    sendJson(res, 200, {ssid: record.hotspot.ssid, pass: record.hotspot.pass, token: record.secret,
+                        hostname: record.hostname || `atech-${id.slice(-6).toLowerCase()}`});
   });
 
   route('POST', /^\/api\/devices\/discover$/, async (req, res) => {
@@ -287,16 +311,18 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
     const record = devices.get(deviceId);
     if (record && !devices.canAccess(deviceId, principal)) { forbidden(res); return; }
     const via = String(body.via || '').toLowerCase();
+    // allowDowngrade: the user confirmed installing a lower app version; it is signed into the manifest.
+    const allowDowngrade = body.allowDowngrade === true || body.allowDowngrade === '1';
     const useCloud = via === 'cloud' || (via !== 'lan' && record && !record.host && record.cloud);
     if (useCloud) {
       try {
-        const deployment = cloudDeployments.create({jobId: id, deviceId, ownerId: principal});
+        const deployment = cloudDeployments.create({jobId: id, deviceId, ownerId: principal, allowDowngrade});
         sendJson(res, 202, {id: deployment.id, deployment, transport: 'cloud'});
       } catch (error) { sendCloudError(res, error); }
       return;
     }
     let deployment;
-    try { deployment = deployments.create({jobId: id, deviceId}); }
+    try { deployment = deployments.create({jobId: id, deviceId, allowDowngrade}); }
     catch (error) { sendJson(res, 400, {error: redactSecrets(error.message)}); return; }
     deployments.run(deployment.id).catch(() => {});
     sendJson(res, 202, {id: deployment.id, deployment, transport: 'lan'});
@@ -423,6 +449,39 @@ function createServer({config, jobs, devices = null, deployments = null, cloud =
     fs.createReadStream(file).pipe(res);
   });
 
+  // The signed update package for the board's own hotspot page: the image plus a manifest signed for
+  // the selected board (or for any board of the demo), downloaded before the user leaves their network.
+  route('GET', /^\/api\/builds\/([0-9a-f]+)\/package$/, async (req, res, [id], url) => {
+    const job = jobs.get(id);
+    if (!job) { sendJson(res, 404, {error: 'Unknown job'}); return; }
+    const principal = principalOf(req, config);
+    if (!jobs.canAccess(id, principal)) { forbiddenBuild(res); return; }
+    const file = jobs.firmwarePath(id);
+    if (!file || !fs.existsSync(file)) { sendJson(res, 409, {error: `Job is ${job.state}, firmware is not available`}); return; }
+    const deviceId = String(url.searchParams.get('deviceId') || '').trim().toUpperCase();
+    if (deviceId && !DEVICE_ID.test(deviceId)) { sendJson(res, 400, {error: 'deviceId must look like ATECH-XXXXXXXXXXXX'}); return; }
+    if (deviceId && devices.get(deviceId) && !devices.canAccess(deviceId, principal)) { forbidden(res); return; }
+    if (deviceId && job.deviceId && job.deviceId !== deviceId) { sendJson(res, 400, {error: `Build ${job.buildId} is bound to ${job.deviceId}, not ${deviceId}`}); return; }
+    const image = fs.readFileSync(file);
+    const entry = config.demos[job.demo];
+    const validation = validateImage(image, {slotSize: config.slotSize, sizeMargin: config.sizeMargin,
+                                             markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER, SIGN_MARKER]});
+    if (!validation.ok) {
+      const missingCore = validation.errors.some(e => e.includes(PROV_MARKER) || e.includes(AGENT_MARKER) || e.includes(SIGN_MARKER));
+      sendJson(res, 400, {error: missingCore ? `Build ${job.buildId} predates the firmware signature service; generate it again before deploying it`
+                                             : `Image validation failed: ${validation.errors.join('; ')}`, code: missingCore ? 'rebuild' : 'bad_request'});
+      return;
+    }
+    const manifest = manifestFor({buildId: job.buildId, demo: job.demo, size: image.length, sha256: sha256Hex(image), version: job.appVersion,
+                                  deviceId, downgrade: url.searchParams.get('downgrade') === '1'});
+    const pkg = buildPackage({image, header: packageHeader({manifest, signer, appName: job.appName})});
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream', 'content-length': pkg.length, 'cache-control': 'no-store',
+      'content-disposition': `attachment; filename="atech-demo${job.demo}-${job.buildId}.atech"`, 'x-atech-build-id': job.buildId,
+    });
+    res.end(pkg);
+  });
+
   route('POST', /^\/api\/builds\/([0-9a-f]+)\/deployed$/, async (req, res, [id]) => {
     const body = await readJson(req);
     if (jobs.get(id) && !jobs.canAccess(id, principalOf(req, config))) { forbiddenBuild(res); return; }
@@ -523,12 +582,13 @@ async function main() {
 
   const loopback = config.host === '127.0.0.1' || config.host === 'localhost' || config.host === '::1';
   if (!loopback && !config.dashboardKey) config.dashboardKey = crypto.randomBytes(12).toString('base64url');
+  const signer = createSigner({file: config.signingKeyFile});
   const devices = new DeviceRegistry({config});
-  const deployments = new DeploymentStore({config, jobs, devices});
+  const deployments = new DeploymentStore({config, jobs, devices, signer});
   const cloud = new CloudDeviceService({config, devices, log: line => console.log(`  ${line}`)});
-  const cloudDeployments = new CloudDeploymentStore({config, jobs, devices, cloud, log: line => console.log(`  ${line}`)});
+  const cloudDeployments = new CloudDeploymentStore({config, jobs, devices, cloud, signer, log: line => console.log(`  ${line}`)});
   const simulated = await startSimulatedDevices(config, devices);
-  const server = createServer({config, jobs, devices, deployments, cloud, cloudDeployments, pioVersion, simulated, log: line => console.log(`  ${line}`)});
+  const server = createServer({config, jobs, devices, deployments, cloud, cloudDeployments, pioVersion, simulated, signer, log: line => console.log(`  ${line}`)});
   server.on('error', error => {
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${config.port} on ${config.host} is already in use (an old "python3 -m http.server ${config.port}" ` +
@@ -554,6 +614,7 @@ async function main() {
     console.log(`  Demo 1:   http://localhost:${config.port}/demo1/${suffix}`);
     console.log(`  Demo 2:   http://localhost:${config.port}/demo2/${suffix}`);
     console.log(`  devices:  ${devices.list().length} paired (${devices.file})`);
+    console.log(`  signing:  firmware key ${signer.keyId()} (${signer.file})`);
     console.log(`  cloud:    boards report to ${config.publicUrl || '(ATECH_PUBLIC_URL not set; generated firmware carries no server URL)'} ` +
                 `(/api/device/*, poll every ${config.cloud.pollMs / 1000} s, jobs expire after ${Math.round(config.cloud.jobTtlMs / 60000)} min)`);
     // The simulated boards also run the cloud agent against this very backend (loopback).

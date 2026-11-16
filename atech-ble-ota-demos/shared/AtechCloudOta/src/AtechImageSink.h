@@ -5,6 +5,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <AtechFwSign.h>
 #include <esp_app_format.h>
 #include <esp_ota_ops.h>
 #include <mbedtls/sha256.h>
@@ -40,12 +41,17 @@ public:
   ImageSink(const ImageSink &) = delete;
   ImageSink &operator=(const ImageSink &) = delete;
 
-  // Erases the inactive slot (esp_ota_begin) and arms the checks. `reason` explains a false.
+  // Erases the inactive slot (esp_ota_begin) and arms the checks. `reason` explains a false. An
+  // empty sha256Hex skips the declared-digest comparison (the signed manifest still carries one).
   bool begin(uint32_t size, const String &sha256Hex, const String &buildId, const String &imageIdentity, String &reason);
+  // The signed manifest this transfer must satisfy; call after begin(). Without one, finish() refuses
+  // the image unless the firmware was built with ATECH_ALLOW_UNSIGNED.
+  void setManifest(const atech::fwsign::Manifest &manifest);
+  bool hasManifest() const { return _hasManifest; }
   // Hashes, scans and writes the bytes; the first 36 bytes are held back until the header is valid.
   bool write(const uint8_t *data, size_t length, String &reason);
-  // Completeness, markers, digest, esp_ota_end and esp_ota_set_boot_partition. The slot is
-  // selected only when this returns true.
+  // Completeness, markers, digest, signature and version policy, esp_ota_end and
+  // esp_ota_set_boot_partition. The slot is selected only when this returns true.
   bool finish(String &reason);
   // Discards everything written so far; safe to call at any point, including after finish.
   void abort();
@@ -54,6 +60,7 @@ public:
   uint32_t received() const { return _received; }
   uint32_t expected() const { return _expected; }
   const char *partitionLabel() const { return _partition ? _partition->label : ""; }
+  uint32_t partitionSize() const { return _partition ? _partition->size : 0; }
   const String &digestHex() const { return _digest; }
 
 private:
@@ -69,6 +76,8 @@ private:
   String _expectedSha;
   String _buildId;
   String _digest;
+  atech::fwsign::Manifest _manifest;
+  bool _hasManifest = false;
   const esp_partition_t *_partition = nullptr;
   esp_ota_handle_t _handle = 0;
   mbedtls_sha256_context _sha;

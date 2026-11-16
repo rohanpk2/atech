@@ -114,9 +114,10 @@ for (const demo of [1, 2]) {
   });
 }
 
-test('hosted dashboard still offers Bluetooth when a board is connected', async () => {
+test('hosted dashboard with a Bluetooth board offers the local update, not a Bluetooth transfer', async () => {
   const {doc} = await bootDashboard(1, {connected: true});
-  assert.equal(doc.body.dataset.deployMethod, 'ble');
+  assert.equal(doc.body.dataset.deployMethod, 'hotspot');
+  assert.equal(doc.getElementById('methodBle'), null);
   assert.equal(doc.getElementById('devFind').hidden, true);
 });
 

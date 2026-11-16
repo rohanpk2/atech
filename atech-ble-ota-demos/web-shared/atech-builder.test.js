@@ -24,9 +24,13 @@ const KNOWN_IDS = new Set(['aiPrompt', 'aiBuild', 'aiStatus', 'aiBadge', 'aiSumm
   'methodWifi',
   // Wi-Fi setup over Bluetooth (step 1)
   'provPanel', 'provState', 'provSsid', 'provNetworks', 'provPassword', 'provScan', 'provJoin', 'provForget', 'provProgress', 'provHint',
+  // enterprise Wi-Fi (PEAP, TTLS, EAP-TLS) in the same block
+  'provAuth', 'provEnterprise', 'provIdentity', 'provUsername', 'provPhase2', 'provDomain', 'provCaBundle', 'provCa', 'provCert', 'provKey',
   // board connections (step 1): pairing two boards and the shared demo state
   'syncPanel', 'syncBadge', 'syncState', 'syncSelf', 'syncPeer', 'syncLink', 'syncValue', 'syncToggle', 'syncConnect', 'syncCode',
-  'syncPairInput', 'syncPair', 'syncUnpair', 'syncHint']);
+  'syncPairInput', 'syncPair', 'syncUnpair', 'syncHint',
+  // the local Wi-Fi update flow (step 3): package, hotspot credentials, the board's page, completion
+  'localPanel', 'localState', 'localPrepare', 'localHint', 'localSsid', 'localPass', 'localOpen', 'localHost', 'localToken', 'localDone', 'localFile']);
 const referenced = [...source.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]);
 assert.ok(referenced.length > 10, 'module must address the builder card by element id');
 assert.deepEqual(referenced.filter(id => !KNOWN_IDS.has(id)), [], 'every referenced id must be documented');
@@ -36,8 +40,20 @@ assert.match(source, /function mount\(/);
 assert.match(source, /job\.demo !== identity\.demo/, 'deploy guard must compare the demo');
 assert.match(source, /job\.firmware\.size > identity\.slotSize/, 'deploy guard must compare the slot size');
 assert.match(source, /job\.deviceId !== identity\.id/, 'deploy guard must honour the bound device id');
-assert.match(source, /for \(const method of \['wifi', 'ble', 'hotspot'\]\) if \(avail\[method\]\.ok\) return method/,
-  'automatic selection must try Wi-Fi, then Bluetooth, then the hotspot');
+assert.match(source, /for \(const method of \['wifi', 'hotspot'\]\) if \(avail\[method\]\.ok\) return method/,
+  'automatic selection must try Wi-Fi (cloud or LAN), then the local Wi-Fi update; Bluetooth is not a firmware transport');
+assert.doesNotMatch(source, /transport\.deploy\(/, 'the shared panel never streams firmware over Bluetooth');
+assert.match(source, /Device offline: local Wi-Fi update available/, 'the offline badge copy');
+assert.match(source, /\/api\/builds\/\$\{[^}]+\}\/package/, 'the local update downloads the signed package from the backend');
+assert.match(source, /local-credentials/, 'the hotspot credentials come from the backend, owner only');
+assert.match(source, /allowDowngrade/, 'a downgrade is sent only after the user confirmed it');
+assert.match(source, /older version/, 'the downgrade confirmation names the situation');
+assert.match(source, /DOWNGRADE_ARM_MS\s*=\s*60000\b/, 'a downgrade confirmation is valid for a minute');
+assert.match(source, /downgradeConfirmed = \{jobId: job\.id, deviceId:/, 'a downgrade confirmation is bound to the board it was given for');
+assert.match(source, /Downgrade refused/, 'a board refusal arms the confirmation for the next click');
+assert.match(source, /hold the BOOT button for about 3 seconds/, 'the local update says how to bring the hotspot up by hand');
+assert.match(source, /A certificate or key is too long \(4 KiB limit\)/, 'the per-file certificate limit is the board\'s');
+assert.match(source, /Bluetooth setup carries at most 6 KiB/, 'an oversize enterprise profile is explained before it is sent');
 assert.match(source, /\/api\/builds\/\$\{job\.id\}\/deploy/, 'Wi-Fi deployment goes through the same-origin backend');
 assert.match(source, /\/api\/deployments\/\$\{id\}\/events/, 'deployment progress streams over SSE');
 assert.match(source, /\/api\/devices\/pair/, 'pairing goes through the backend');
@@ -47,11 +63,9 @@ assert.match(source, /KiB\/s/, 'transfer speed must be shown in KiB/s');
 assert.match(source, /etaMs/, 'estimated time remaining must be shown');
 assert.match(source, /EventSource\(/, 'progress must stream over SSE');
 assert.match(source, /setInterval\(|function poll/, 'progress must fall back to polling');
-assert.match(source, /identity\.build !== job\.buildId/, 'verification must compare the build id');
-assert.match(source, /loops/, 'verification must watch the loop counter');
-assert.match(source, /CONTROL\.echo/, 'verification must request an echo');
-assert.match(source, /CONTROL\.confirm/, 'verification must confirm the boot');
-assert.match(source, /pairing and upload are manual/, 'hotspot copy must be honest');
+assert.match(source, /build === job\.buildId/, 'the local update completes only when the board reports the new build id');
+assert.match(source, /protocol\.CONTROL\[opName\]/, 'recovery controls go through the identity service');
+assert.match(source, /board's own page|board's page/, 'the local update copy names the board page');
 assert.doesNotMatch(source, /\bconfirm\(|\balert\(/, 'no blocking browser dialogs');
 assert.doesNotMatch(source + css, /—/, 'copy must not contain em dashes');
 assert.match(source, /\/api\/builds\/\$\{[^}]+\}\/firmware\.bin/, 'download link must point at the backend');

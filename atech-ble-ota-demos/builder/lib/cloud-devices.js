@@ -22,6 +22,15 @@ const LIMITS = {ip: {capacity: 60, perMinute: 60}, id: {capacity: 20, perMinute:
 const truthy = value => value === true || value === '1' || value === 'true';
 const number = value => { const n = Number(value); return Number.isFinite(n) ? n : 0; };
 
+// The board's own hotspot credentials, sent once per login over the device-authenticated TLS
+// session so the owner's dashboard can show them for a local update. Malformed values are ignored.
+function hotspotOf(info = {}) {
+  const ssid = String(info.ap_ssid || '').trim();
+  const pass = String(info.ap_pass || '');
+  if (!/^ATECH-[0-9A-F]{4,12}$/i.test(ssid) || pass.length < 8 || pass.length > 63) return null;
+  return {ssid, pass};
+}
+
 // The board's compact sync status (shared/AtechSync compactStatusJson), sent as sync=<JSON>.
 function parseSyncReport(text) {
   if (!text) return null;
@@ -42,6 +51,10 @@ function normalizeReport(info = {}) {
     pending: truthy(info.pending), safe: truthy(info.safe), up: number(info.up), loops: number(info.loops), rssi: number(info.rssi),
     heap: number(info.heap), heapMin: number(info.heap_min), ready: truthy(info.ready), transferring: truthy(info.transferring),
     bootJob: String(info.boot_job || ''), bootBuild: String(info.boot_build || ''), state: String(info.state || ''),
+    // Network state (AtechWifiLan probe) and transport (AtechWifiOta controller), absent on old firmware.
+    internet: String(info.internet || 'unknown'), captiveUrl: String(info.captive_url || ''), transport: String(info.transport || ''),
+    transportReason: String(info.reason || ''), hotspotActive: truthy(info.hotspot), mac: String(info.mac || ''), wifiAuth: String(info.wifi_auth || ''),
+    kid: String(info.kid || ''), maxVersion: number(info.max_ver),
   };
 }
 
@@ -137,8 +150,9 @@ class CloudDeviceService {
     this.registrations.delete(id);
     const report = normalizeReport(info);
     const cloud = record.cloud || {};
+    const hotspot = hotspotOf(info) || record.hotspot || null;
     this.devices.upsert({id, suffix: record.suffix || id.slice(-6), demo: report.demo || record.demo || null,
-                         firmware: report.fw || record.firmware, build: report.build || record.build,
+                         firmware: report.fw || record.firmware, build: report.build || record.build, hotspot,
                          cloud: {...cloud, registeredAt: cloud.registeredAt || this.iso(), verified: true, lastLoginAt: this.iso(),
                                  lastAuthFailureAt: null, agent: report.agent, lastSeenAt: this.iso(), lastReport: report}});
     this.lastPersist.set(id, issuedAt);
@@ -253,4 +267,4 @@ class CloudDeviceService {
   }
 }
 
-module.exports = {CloudDeviceService, normalizeReport, parseSyncReport, NONCE_TTL_MS, SESSION_TTL_MS};
+module.exports = {CloudDeviceService, normalizeReport, parseSyncReport, hotspotOf, NONCE_TTL_MS, SESSION_TTL_MS};

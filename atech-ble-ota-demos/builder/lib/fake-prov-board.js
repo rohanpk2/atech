@@ -11,7 +11,7 @@ const {provisionGrantHex} = require('./cloud-auth');
 const FLAG_LAST = 0x01;
 const FLAG_FIRST = 0x02;
 const MAX_FRAGMENT = 240;
-const MAX_MESSAGE = 1024;
+const MAX_MESSAGE = 6144;
 const REPLY_BIT = 0x80;
 const ERROR_OP = 0xff;
 const OP_HELLO = 1;
@@ -20,6 +20,50 @@ const OP_PROVISION = 3;
 const OP_FORGET = 4;
 const OP_SYNC = 5;
 const HKDF_INFO = 'atech-prov/1';
+const AUTH_METHODS = ['personal', 'peap', 'ttls', 'tls'];
+const PHASE2_METHODS = ['eap', 'mschapv2', 'mschap', 'pap', 'chap'];
+// Refusal texts shared with shared/AtechWifiLan/src/AtechWifiLan.cpp (saveProfile).
+const CA_REFUSAL = 'Enterprise Wi-Fi needs a trusted CA certificate (PEM) or the built-in bundle; certificate checking is never disabled';
+
+// The board's single Wi-Fi profile, validated the way AtechWifiLan::saveProfile does. Returns
+// {profile, pass} or {error}.
+function buildProfile(request) {
+  const ssid = String(request.ssid);
+  const auth = request.auth === undefined || request.auth === '' ? 'personal' : String(request.auth);
+  const pass = request.pass === undefined ? '' : String(request.pass);
+  if (ssid.length < 1 || ssid.length > 32) return {error: 'SSID must contain 1 to 32 characters'};
+  if (!AUTH_METHODS.includes(auth)) return {error: 'Unknown Wi-Fi security method'};
+  const profile = {ssid, auth, identity: '', username: '', ca: '', cert: '', key: '', phase2: 'mschapv2', domain: '', caBundle: false};
+  if (auth === 'personal') {
+    if (pass && (pass.length < 8 || pass.length > 63)) return {error: 'Wi-Fi password must contain 8 to 63 characters (or be empty for an open network)'};
+    return {profile, pass};
+  }
+  profile.identity = String(request.ident || '');
+  profile.username = String(request.user || '');
+  profile.domain = String(request.domain || '');
+  profile.caBundle = request.ca_bundle === '1' || request.ca_bundle === true;
+  profile.ca = String(request.ca || '');
+  if (!profile.ca && !profile.caBundle) return {error: CA_REFUSAL};
+  if (profile.ca && !profile.ca.startsWith('-----BEGIN')) return {error: 'The CA certificate is not PEM'};
+  if ((auth === 'peap' || auth === 'ttls') && (!profile.username || !pass)) return {error: 'PEAP and TTLS need a username and password'};
+  if (auth === 'tls') {
+    profile.cert = String(request.crt || '');
+    profile.key = String(request.key || '');
+    if (!profile.cert || !profile.key) return {error: 'EAP-TLS needs a client certificate and its private key'};
+    if (!profile.identity) return {error: 'EAP-TLS needs an identity (usually the certificate subject)'};
+  }
+  if (auth === 'ttls') {
+    profile.phase2 = request.ph2 ? String(request.ph2) : 'mschapv2';
+    if (!PHASE2_METHODS.includes(profile.phase2)) return {error: 'Unknown TTLS phase 2 method'};
+  }
+  // The same budget as AtechWifiLan::validateProfile: 4 KiB per PEM, 10 KiB together (20 KiB NVS partition).
+  if (profile.ca.length > 4096 || profile.cert.length > 4096 || profile.key.length > 4096) return {error: 'A certificate or key is too long (4 KiB limit)'};
+  if (profile.ca.length + profile.cert.length + profile.key.length > 10240) return {error: 'Certificates and key together exceed 10 KiB; use a shorter CA chain or the built-in bundle'};
+  if (profile.identity.length > 128 || profile.username.length > 128 || profile.domain.length > 128 || pass.length > 128) {
+    return {error: 'Identity, username, password and server name are at most 128 characters'};
+  }
+  return {profile, pass: auth === 'tls' ? '' : pass};
+}
 
 // The sealed plaintext is a form body on both sides: strings percent-encoded, booleans 1/0.
 function encodeForm(object) {
@@ -35,6 +79,7 @@ function decodeForm(text) {
   const out = {};
   for (const [key, value] of new URLSearchParams(text)) out[key] = value;
   if (out.claim !== undefined) out.claim = out.claim === '1';
+  if (out.hotspot !== undefined) out.hotspot = out.hotspot === '1';
   if (out.wifi !== undefined) out.wifi = out.wifi === '1';
   if (out.url !== undefined && /^[01]$/.test(out.url) && out.op === undefined) out.urlFlag = out.url === '1';
   return out;
@@ -58,6 +103,7 @@ function createFakeProvBoard({
     id, locked, unlockUntil: 0, ssid: '', pass: '', url: '', joining: false, connected: false, ip: '', rssi: 0, reason: 0,
     cloudState: 'disabled', cloudSession: false, busy: false, lastClientPub: null, lastBoardPub: null, nonce: null, key: null,
     transcript: null, plaintextSeen: [], tokenReleased: 0, requests: [],
+    profile: null, apSsid: `ATECH-${id.slice(-6)}`, apPass: `simulated-hotspot-${id.slice(-6).toLowerCase()}`,
   };
   const handlers = new Set();
   let parts = [];
@@ -126,7 +172,7 @@ function createFakeProvBoard({
   }
 
   function scan() {
-    const lines = networks.slice(0, 12).map(n => `${n.ssid}\t${n.rssi}\t${n.open ? 1 : 0}`).join('\n');
+    const lines = networks.slice(0, 12).map(n => `${n.ssid}\t${n.rssi}\t${n.open ? 1 : 0}\t${n.enterprise ? 1 : 0}`).join('\n');
     reply(OP_SCAN | REPLY_BIT, Buffer.from(lines ? lines + '\n' : '', 'utf8'));
   }
 
@@ -138,18 +184,21 @@ function createFakeProvBoard({
     if (!authorized(request.grant)) { answer({ok: false, error: 'This board is locked: it already has an owner. Ask the owner\'s dashboard for a grant or press the BOOT button once'}); return; }
     if (state.busy) { answer({ok: false, error: 'The board is busy with an update; try again when it is done'}); return; }
     const ssid = request.ssid === undefined ? null : String(request.ssid);
-    const pass = request.pass === undefined ? '' : String(request.pass);
     const url = request.url === undefined ? null : String(request.url).trim().replace(/\/+$/, '');
-    if (ssid !== null && (ssid.length < 1 || ssid.length > 32)) { answer({ok: false, error: 'SSID must contain 1 to 32 characters'}); return; }
-    if (ssid !== null && pass && (pass.length < 8 || pass.length > 63)) { answer({ok: false, error: 'Wi-Fi password must contain 8 to 63 characters (or be empty for an open network)'}); return; }
+    let built = null;
+    if (ssid !== null) {
+      built = buildProfile(request);
+      if (built.error) { answer({ok: false, error: built.error}); return; }
+    }
     if (url !== null && url && !(url.startsWith('https://') || (allowHttp && url.startsWith('http://')))) {
       answer({ok: false, error: allowHttp ? 'Server URL must start with https:// or http://' : 'Server URL must start with https:// (the certificate is validated)'});
       return;
     }
-    if (ssid !== null) { state.ssid = ssid; state.pass = pass; state.joining = true; state.connected = false; state.reason = 0; }
+    if (built) { state.ssid = ssid; state.pass = built.pass; state.profile = built.profile; state.joining = true; state.connected = false; state.reason = 0; }
     if (url !== null) { state.url = url; state.cloudState = url ? 'waiting_wifi' : 'disabled'; }
     const result = {ok: true, joining: ssid !== null};
     if (request.claim) { result.token = token; state.tokenReleased++; }
+    if (request.hotspot) { result.ap_ssid = state.apSsid; result.ap_pass = state.apPass; }
     answer(result);
   }
 
@@ -214,7 +263,7 @@ function createFakeProvBoard({
     status() {
       return JSON.stringify({
         prov: 1, id, locked: state.locked, unlock_ms: Math.max(0, state.unlockUntil - now()), session: Boolean(state.key),
-        wifi: {configured: Boolean(state.ssid), ssid: state.ssid, connected: state.connected, ip: state.ip, rssi: state.rssi, reason: state.reason, joining: state.joining},
+        wifi: {configured: Boolean(state.ssid), ssid: state.ssid, auth: state.profile ? state.profile.auth : 'personal', connected: state.connected, ip: state.ip, rssi: state.rssi, reason: state.reason, joining: state.joining},
         cloud: {url: state.url, state: state.cloudState, session: state.cloudSession, last_error: '', last_contact_ms: 0},
         busy: state.busy,
       });
@@ -230,4 +279,4 @@ function createFakeProvBoard({
   return board;
 }
 
-module.exports = {createFakeProvBoard, MAX_FRAGMENT, MAX_MESSAGE, HKDF_INFO};
+module.exports = {createFakeProvBoard, buildProfile, MAX_FRAGMENT, MAX_MESSAGE, HKDF_INFO, AUTH_METHODS, PHASE2_METHODS, CA_REFUSAL};

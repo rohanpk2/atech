@@ -37,6 +37,14 @@ for (const route of ['/api/device/challenge', '/api/device/login', '/api/device/
 for (const field of ['boot_job', 'boot_build', 'ready=', 'transferring=', 'heap=', 'heap_min=', 'phase=', 'received=', 'total=', 'error=']) {
   assert.ok(agent.includes(field), `agent must send ${field}`);
 }
+// The signed manifest the poll hands out, verified by the shared sink; the confirmed version is remembered.
+for (const key of ['"sig"', '"dg"', '"kid"', '"target"', '"ver"']) assert.ok(agent.includes(`kvGet(response, ${key})`), `runJob must read ${key}`);
+assert.ok(agent.includes('sink.setManifest('), 'the manifest reaches the sink before the download');
+assert.ok(agent.includes('fwsign::recordRunningVersion('), 'a confirmed image records its version for the downgrade rule');
+// Captive networks: the agent says so instead of failing TLS forever, and the poll carries the network state.
+assert.ok(header.includes('const char *(*internetState)()') && header.includes('String (*extraPoll)()'), 'network state hooks');
+assert.ok(agent.includes('State::Captive') && agent.includes('"captive"') && agent.includes('needs a sign-in'), 'a captive network is a named state');
+for (const field of ['internet=', 'kid=', 'max_ver=', 'mac=']) assert.ok(agent.includes(field), `the poll reports ${field}`);
 
 // Transport security and memory discipline.
 assert.ok(agent.includes('useBuiltinCACertBundle'), 'the built-in root bundle validates the server certificate');
@@ -82,6 +90,9 @@ for (const method of ['begin(const AtechCloudOtaConfig &', 'void loop()', 'bool 
   assert.ok(header.includes(method), `AtechCloudOta.h must declare ${method}`);
 }
 assert.ok(header.includes('String (*authToken)()') && header.includes('bool (*otherOtaBusy)()') && header.includes('bool (*wifiConnected)()'));
+assert.ok(header.includes('String (*extraLogin)()'), 'login-only extras (the hotspot credentials) have their own hook');
+assert.ok(agent.includes('config.extraLogin') && agent.includes('"sign_key"') && agent.includes('fwsign::pinKey(') && agent.includes('"cloud"'),
+          'the login pins the server signing key at the first authenticated contact');
 
 // Core, LAN identity and portal hooks.
 assert.ok(coreHeader.includes('bool (*holdAutoConfirm)();'), 'the core must let the cloud agent hold automatic confirmation');
@@ -97,9 +108,25 @@ assert.doesNotMatch(portal, /otaToken\.c_str\(\)\s*\)\s*;[^\n]*sendJson/, 'the p
 // Both demos wire the agent identically.
 for (const [name, main] of Object.entries(mains)) {
   for (const needle of ['#include <AtechCloudOta.h>', 'AtechCloudOta cloudOta;', 'cloudOta.isTransferring()', 'coreConfig.holdAutoConfirm',
-                         'lanConfig.extraIdentity', 'wifiOtaConfig.cloud = &cloudOta', 'ATECH_CLOUD_URL', 'ATECH_CLOUD_ALLOW_HTTP', 'cloudOta.begin(', 'cloudOta.loop()']) {
+                         'lanConfig.extraIdentity', 'wifiOtaConfig.cloud = &cloudOta', 'ATECH_CLOUD_URL', 'ATECH_CLOUD_ALLOW_HTTP', 'cloudOta.begin(', 'cloudOta.loop()',
+                         'cloudConfig.extraLogin = hotspotReport', 'atech::fwsign::begin(ATECH_FW_PUBKEY, ATECH_ALLOW_UNSIGNED != 0)', 'wifiOtaConfig.ssidPrefix = "ATECH"',
+                         'cloudConfig.extraPoll = transportReport', 'wifiOtaConfig.autoStart = true', 'lanConfig.transportIdentity = transportIdentity']) {
     assert.ok(main.includes(needle), `${name} main.cpp must contain ${needle}`);
   }
+}
+
+
+// A session that stopped answering is not "online": three failed polls end it (the agent logs in again
+// when the network is back), the contact age is exposed for the hotspot controller, and a failure asks
+// the Wi-Fi layer to re-probe for a captive page.
+const agentCpp = fs.readFileSync(path.join(__dirname, 'src', 'AtechCloudOta.cpp'), 'utf8');
+const agentH = fs.readFileSync(path.join(__dirname, 'src', 'AtechCloudOta.h'), 'utf8');
+assert.match(agentCpp, /MAX_POLL_FAILURES\s*=\s*3\b/, 'three failed polls in a row end the session');
+assert.ok(agentCpp.includes('pollFailures >= MAX_POLL_FAILURES'), 'the poll counts its failures');
+assert.ok(agentH.includes('uint32_t lastContactAgeMs() const'), 'the contact age is public');
+assert.ok(agentH.includes('void (*internetRecheck)();') && agentCpp.includes('config.internetRecheck()'), 'a failed poll asks for an internet re-probe');
+for (const [name, main] of Object.entries(mains)) {
+  assert.ok(main.includes('cloudConfig.internetRecheck = internetRecheckHook'), `${name} wires the re-probe hook`);
 }
 
 console.log('Atech cloud OTA agent structure tests passed');

@@ -77,6 +77,35 @@
               <button id="provScan" class="btn secondary" type="button">Scan</button>
               <button id="provJoin" class="btn primary" type="button">Join Wi-Fi</button>
             </div>
+            <div class="prov-method">
+              <select id="provAuth" aria-label="Wi-Fi security">
+                <option value="personal">Personal network (WPA2 or WPA3 password)</option>
+                <option value="peap">Enterprise: PEAP (username and password)</option>
+                <option value="ttls">Enterprise: EAP-TTLS (username and password)</option>
+                <option value="tls">Enterprise: EAP-TLS (client certificate)</option>
+              </select>
+            </div>
+            <div id="provEnterprise" class="prov-enterprise" hidden>
+              <div class="prov-grid">
+                <input id="provUsername" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="Username">
+                <input id="provIdentity" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Anonymous identity (optional)">
+                <select id="provPhase2" aria-label="TTLS phase 2 method">
+                  <option value="mschapv2">Phase 2: MSCHAPv2</option>
+                  <option value="eap">Phase 2: EAP</option>
+                  <option value="mschap">Phase 2: MSCHAP</option>
+                  <option value="pap">Phase 2: PAP</option>
+                  <option value="chap">Phase 2: CHAP</option>
+                </select>
+                <input id="provDomain" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Server name to match (optional)">
+              </div>
+              <label class="prov-check"><input id="provCaBundle" type="checkbox"> Trust the built-in certificate bundle (public CAs) instead of a CA file</label>
+              <div class="prov-grid">
+                <label class="prov-file">CA certificate (PEM)<input id="provCa" type="file" accept=".pem,.crt,.cer,.txt"></label>
+                <label class="prov-file">Client certificate (PEM)<input id="provCert" type="file" accept=".pem,.crt,.cer"></label>
+                <label class="prov-file">Client private key (PEM)<input id="provKey" type="file" accept=".pem,.key"></label>
+              </div>
+              <p class="hint">The board checks the authentication server's certificate against the CA or the bundle; certificate checking is never disabled. Certificates travel once, inside the encrypted Bluetooth session.</p>
+            </div>
             <div class="actions prov-actions">
               <button id="provForget" class="btn text" type="button" hidden>Forget Wi-Fi</button>
             </div>
@@ -133,8 +162,8 @@
                 <li>In <strong>Wi-Fi setup</strong>, click Scan, choose your 2.4 GHz network, enter its password and click <strong>Join Wi-Fi</strong>. The password goes to the board over an encrypted Bluetooth session and nowhere else. The board is claimed for you automatically.</li>
                 <li>Once the board shows as online, it stays reachable through the cloud from any browser, including Safari and your phone.</li>
               </ol>
-              <p class="hint">No Bluetooth? The board has a hotspot page as a backup: hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it (do not press RST); join the Wi-Fi network <code>Atech-OTA-D1-&lt;suffix&gt;</code> (the suffix is the board's pairing code; the hotspot password and the OTA authorization code are printed on the serial console at boot); open <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a>, enter the OTA authorization code, tap Scan, choose your network and tap <strong>Join this network</strong>. On a local backend, click <strong>Find devices</strong> afterwards and pair the board with the same code.</p>
-              <p class="hint">No Wi-Fi or Bluetooth path at all? Download the firmware in step 3, open the board's hotspot page the same way, choose that <code>firmware.bin</code> and tap Deploy Firmware. This dashboard does not fetch or upload over the hotspot. Disconnect any active Bluetooth session first.</p>
+              <p class="hint">No Bluetooth? The board has its own hotspot page. It comes up by itself when the board has no Wi-Fi yet or cannot reach the cloud; otherwise hold the physical <strong>BOOT</strong> button for about 3 seconds, then release it (do not press RST). Join the Wi-Fi network <code>ATECH-&lt;suffix&gt;</code> (the suffix is the board's pairing code; the hotspot password and the OTA authorization code are printed on the serial console at boot), open <a href="http://192.168.4.1" target="_blank" rel="noreferrer">http://192.168.4.1</a> (or <code>http://atech-&lt;suffix&gt;.local/</code>), enter the OTA authorization code, tap Scan, choose your network and tap <strong>Join this network</strong>. Enterprise networks (PEAP, TTLS, EAP-TLS) take their CA certificate there too. On a local backend, click <strong>Find devices</strong> afterwards and pair the board with the same code.</p>
+              <p class="hint">Board stuck offline, or no Wi-Fi at all? Use the <strong>Local Wi-Fi update</strong> in step 3: prepare the signed package here, join the board's hotspot and upload it on the board's page. This dashboard does not upload over the hotspot; the board's own page does, and the board verifies the signature before installing. Bluetooth never carries firmware.</p>
             </div>
           </details>
         </section>
@@ -181,19 +210,28 @@
               <strong>Wi-Fi</strong>
               <small id="methodWifiNote">Board on your Wi-Fi and paired.</small>
             </button>
-            <button id="methodBle" class="method" type="button" aria-pressed="false">
-              <strong>Bluetooth</strong>
-              <small id="methodBleNote">Chrome with a connected board.</small>
-            </button>
             <button id="methodHotspot" class="method" type="button" aria-pressed="false">
-              <strong>Board hotspot</strong>
-              <small id="methodHotspotNote">Download the file and upload it on the board's page.</small>
+              <strong>Local Wi-Fi update</strong>
+              <small id="methodHotspotNote">Prepare the signed package here, then upload it on the board's own page.</small>
             </button>
           </div>
           <div class="actions">
             <button id="aiDeploy" class="btn primary" type="button" disabled>Deploy</button>
             <button id="deployAbort" class="btn secondary" type="button" hidden>Stop</button>
-            <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware</a>
+            <a id="aiDownload" class="btn secondary" href="#" download hidden>Download firmware (.bin)</a>
+          </div>
+          <div id="localPanel" class="local-panel" hidden>
+            <p id="localState" class="state neutral" aria-live="polite"></p>
+            <ol class="local-steps">
+              <li>While this computer is still online, click
+                <button id="localPrepare" class="btn secondary" type="button">Prepare update</button>
+                <a id="localFile" class="btn secondary" href="#" download hidden>Save the package</a>
+                The signed package is checked and saved here first.</li>
+              <li>Join the board's Wi-Fi network <code id="localSsid"></code> with the password <code id="localPass"></code>.</li>
+              <li>Open <a id="localOpen" href="http://192.168.4.1/" target="_blank" rel="noreferrer">http://192.168.4.1/</a> <span id="localHost"></span>, enter the authorization code <code id="localToken"></code>, choose the saved package and tap <strong>Deploy Firmware</strong>. The board checks the signature, installs the image into its spare slot and restarts.</li>
+              <li>Rejoin your own Wi-Fi. The board rejoins its network and reports back here. <span id="localDone"></span></li>
+            </ol>
+            <p id="localHint" class="hint"></p>
           </div>
           <div id="deployProgress" class="progress" role="progressbar" aria-label="Deployment progress"
                aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
@@ -271,7 +309,7 @@
             <h2 id="ota-heading">Send a firmware file over Bluetooth</h2>
             <span id="otaBadge" class="badge neutral">Ready</span>
           </div>
-          <p class="note">For a firmware.bin you compiled yourself. The normal flow is the three steps above.</p>
+          <p class="note">Legacy protocol demo. The standard firmware does not take firmware over Bluetooth (the board answers "disabled"); this card only works with a lab build made with <code>-DATECH_BLE_OTA_DEMO=1</code>. Updates travel over Wi-Fi: use the three steps above.</p>
           <div class="ota-controls">
             <label class="file" for="bin">
               <input type="file" accept=".bin,application/octet-stream" id="bin">

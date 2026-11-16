@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const {manifest, partFile, baseBuildIsStale, ensureBaseBuild, PART_OFFSETS, BASE_STAMP} = require('../lib/installer');
+const {manifest, partFile, baseBuildIsStale, ensureBaseBuild, buildFlagsEnv, baseStamp, PART_OFFSETS, BASE_STAMP} = require('../lib/installer');
 const {loadConfig} = require('../lib/config');
 
 test('manifest lists the four parts at the ESP32-S3 offsets', () => {
@@ -111,4 +111,22 @@ test('a failed base build keeps its error until the next start', async () => {
   assert.equal(retried.error, null, 'a retry clears the previous error');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(tracker.state(2).built, true);
+});
+
+test('buildFlagsEnv bakes the signing public key next to the URL and the stamp tracks both', () => {
+  const pub = '04' + 'ab'.repeat(64);
+  assert.equal(buildFlagsEnv({publicUrl: 'https://api.example.com', signingPublicKey: pub}).PLATFORMIO_BUILD_FLAGS,
+               `'-DATECH_CLOUD_URL="https://api.example.com"' '-DATECH_FW_PUBKEY="${pub}"'`);
+  assert.equal(buildFlagsEnv({publicUrl: null, signingPublicKey: pub}).PLATFORMIO_BUILD_FLAGS, `'-DATECH_FW_PUBKEY="${pub}"'`);
+  assert.deepEqual(buildFlagsEnv({publicUrl: null}), {});
+  assert.equal(baseStamp({publicUrl: 'https://a', signingPublicKey: pub}), `https://a\n${pub}`);
+  assert.equal(baseStamp({publicUrl: 'https://a'}), 'https://a');
+  const config = loadConfig({});
+  const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'atech-shared-'));
+  const demo = {...config.demos[1], dir: fakeDemo(`https://old.example\n${pub}`)};
+  const withKey = {...config, sharedDir: shared, publicUrl: 'https://old.example', signingPublicKey: pub, demos: {...config.demos, 1: demo}};
+  assert.equal(baseBuildIsStale(1, {config: withKey}), false, 'same URL and key');
+  assert.equal(baseBuildIsStale(1, {config: {...withKey, signingPublicKey: '04' + 'cd'.repeat(64)}}), true, 'the key changed');
+  const noKeyStamp = {...withKey, demos: {...config.demos, 1: {...demo, dir: fakeDemo('https://old.example')}}};
+  assert.equal(baseBuildIsStale(1, {config: noKeyStamp}), true, 'an image built before the key existed');
 });

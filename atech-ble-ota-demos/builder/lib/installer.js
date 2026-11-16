@@ -54,22 +54,32 @@ function baseBuildIsStale(demo, {config = loadConfig()} = {}) {
   const entry = config.demos[demo];
   const firmware = path.join(entry.dir, '.pio', 'build', 'base', 'firmware.bin');
   if (!fs.existsSync(firmware)) return true;
-  // An image built for another server URL (or before one was configured) must be rebuilt.
-  if ((readStamp(entry) || '') !== (config.publicUrl || '')) return true;
+  // An image built for another server URL or signing key (or before either existed) must be rebuilt.
+  if ((readStamp(entry) || '') !== baseStamp(config)) return true;
   const built = fs.statSync(firmware).mtimeMs;
   return newestMtime(path.join(entry.dir, 'src')) > built || newestMtime(config.sharedDir) > built;
 }
 
-// The USB baseline carries the backend's public URL too, so a freshly installed board knows
-// where to report without typing anything on the hotspot page. PLATFORMIO_BUILD_FLAGS is split
-// like a shell line (shlex), so the inner double quotes only survive inside single quotes.
+// The USB baseline carries the backend's public URL and its firmware signing public key, so a
+// freshly installed board knows where to report and which signatures to trust without typing
+// anything on the hotspot page. PLATFORMIO_BUILD_FLAGS is split like a shell line (shlex), so the
+// inner double quotes only survive inside single quotes.
+const PUBLIC_KEY_HEX = /^04[0-9a-f]{128}$/i;
+
 function buildFlagsEnv(config) {
-  if (!config.publicUrl) return {};
-  return {PLATFORMIO_BUILD_FLAGS: `'-DATECH_CLOUD_URL="${String(config.publicUrl).replace(/["'\\\s]/g, '')}"'`};
+  const flags = [];
+  if (config.publicUrl) flags.push(`'-DATECH_CLOUD_URL="${String(config.publicUrl).replace(/["'\\\s]/g, '')}"'`);
+  if (config.signingPublicKey && PUBLIC_KEY_HEX.test(config.signingPublicKey)) flags.push(`'-DATECH_FW_PUBKEY="${String(config.signingPublicKey).toLowerCase()}"'`);
+  return flags.length ? {PLATFORMIO_BUILD_FLAGS: flags.join(' ')} : {};
 }
 
-// Records which server URL a base image was built with, next to firmware.bin.
+// Records which server URL and signing key a base image was built with, next to firmware.bin.
 const BASE_STAMP = 'atech-cloud-url.stamp';
+
+function baseStamp(config) {
+  const key = config.signingPublicKey && PUBLIC_KEY_HEX.test(config.signingPublicKey) ? String(config.signingPublicKey).toLowerCase() : '';
+  return `${config.publicUrl || ''}${key ? `\n${key}` : ''}`;
+}
 
 function stampPath(entry) { return path.join(entry.dir, '.pio', 'build', 'base', BASE_STAMP); }
 
@@ -84,7 +94,7 @@ async function ensureBaseBuild(demo, {config = loadConfig(), force = false, onLi
   const result = await runPio(['run', '-e', 'base'], {cwd: entry.dir, onLine, pioBin: config.pio, jobs: config.pioJobs ?? null,
                                                       env: buildFlagsEnv(config)});
   if (result.code !== 0) throw new Error(`Base build for demo ${demo} failed (exit ${result.code})`);
-  try { fs.writeFileSync(stampPath(entry), config.publicUrl || ''); } catch { /* the next check rebuilds */ }
+  try { fs.writeFileSync(stampPath(entry), baseStamp(config)); } catch { /* the next check rebuilds */ }
   return {dir: entry.dir, built: true, log: result.log};
 }
 
@@ -110,5 +120,5 @@ function createBaseBuildTracker({ensure = ensureBaseBuild} = {}) {
   return {start, state};
 }
 
-module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, buildFlagsEnv, createBaseBuildTracker,
+module.exports = {manifest, partFile, ensureBaseBuild, baseBuildIsStale, buildFlagsEnv, baseStamp, createBaseBuildTracker,
                   PART_OFFSETS, PART_ORDER, BASE_STAMP};

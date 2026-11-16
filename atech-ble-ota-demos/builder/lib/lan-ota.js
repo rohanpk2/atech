@@ -10,6 +10,7 @@ const {loadConfig} = require('./config');
 const {request, keepAliveAgent} = require('./lan-client');
 const {beginMessage, hmacHex, sha256Hex} = require('./lan-auth');
 const {DEFAULT_PORT} = require('./devices');
+const {createSigner, manifestFor} = require('./signing');
 
 const STATES = ['queued', 'preflight', 'uploading', 'finishing', 'rebooting', 'verifying', 'confirming', 'verified', 'failed', 'aborted'];
 const DEFAULT_CHUNK = 128 * 1024;
@@ -20,10 +21,12 @@ const PROGRESS_INTERVAL_MS = 150;
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 class DeploymentStore {
-  constructor({config = loadConfig(), jobs, devices, deps = {}} = {}) {
+  constructor({config = loadConfig(), jobs, devices, signer = null, deps = {}} = {}) {
     this.config = config;
     this.jobs = jobs;
     this.devices = devices;
+    // The begin request carries a manifest signed for the board (shared/AtechFwSign verifies it at finish).
+    this.signer = signer || createSigner({file: config.signingKeyFile});
     this.deps = {request, keepAliveAgent, delay, readFirmware: file => fs.readFileSync(file), ...deps};
     this.deployments = new Map();
     this.subscribers = new Map();
@@ -60,7 +63,7 @@ class DeploymentStore {
     }
   }
 
-  create({jobId, deviceId}) {
+  create({jobId, deviceId, allowDowngrade = false}) {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Unknown build ${jobId}`);
     if (job.state !== 'ready' || !job.firmware) throw new Error(`Build ${job.buildId} is ${job.state}; only a ready build can be deployed`);
@@ -75,6 +78,7 @@ class DeploymentStore {
     const deployment = {
       id: crypto.randomBytes(5).toString('hex'), jobId, buildId: job.buildId, appName: job.appName, appVersion: job.appVersion,
       demo: job.demo, deviceId, transport: 'wifi', state: 'queued', stage: 'Queued', total: job.firmware.size, sent: 0, acked: 0,
+      version: Number(job.appVersion) || 0, downgrade: Boolean(allowDowngrade), signature: null,
       percent: 0, speedBps: 0, etaMs: null, timings: {}, checks: [], error: null, host: record.host, port: record.port || DEFAULT_PORT,
       abortRequested: false, createdAt: now, updatedAt: now, finishedAt: null,
     };
@@ -149,10 +153,16 @@ class DeploymentStore {
       if (challenge.device && challenge.device !== deployment.deviceId) throw new Error(`${host} answered as ${challenge.device}`);
       const auth = hmacHex(secret, beginMessage({deviceId: deployment.deviceId, nonce: challenge.nonce, size: image.length,
                                                  sha256: digest, buildId: deployment.buildId}));
+      const manifest = manifestFor({buildId: deployment.buildId, demo: deployment.demo, size: image.length, sha256: digest,
+                                    version: deployment.version, deviceId: deployment.deviceId, downgrade: deployment.downgrade});
+      const signature = this.signer.sign(manifest);
+      this.update(deployment, {signature});
       const beginAt = Date.now();
       const begin = await send({host, port, method: 'POST', path: '/api/ota/begin', timeoutMs: 20000, headers: {
         'X-Atech-Device': deployment.deviceId, 'X-Atech-Nonce': challenge.nonce, 'X-Atech-Size': String(image.length),
         'X-Atech-SHA256': digest, 'X-Atech-Build': deployment.buildId, 'X-Atech-Auth': auth,
+        'X-Atech-Sig': signature, 'X-Atech-Version': String(manifest.version), 'X-Atech-Downgrade': manifest.downgrade ? '1' : '0',
+        'X-Atech-Target': deployment.deviceId, 'X-Atech-Key': this.signer.publicKeyHex(),
       }});
       if (begin.status !== 200 || !begin.json || !begin.json.session) {
         const detail = (begin.json && begin.json.error) || `HTTP ${begin.status}`;

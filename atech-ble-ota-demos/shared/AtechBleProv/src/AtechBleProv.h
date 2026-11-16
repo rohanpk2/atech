@@ -21,6 +21,7 @@ struct AtechBleProvConfig {
   AtechCloudOta *cloud;               // cloud agent (server URL, login state)
   AtechSync *sync;                    // optional: board-to-board sync (pairing codes, state, events) over the same sealed session
   String (*authToken)();              // the pairing token (OTA authorization code); released only to an authorized client
+  String (*hotspotReport)();          // optional: "ap_ssid=..&ap_pass=.." (the board's hotspot credentials), released only to an authorized client
   bool (*busy)();                     // true while any OTA transport owns flash: changes are refused
   uint32_t unlockWindowMs;            // how long a BOOT press unlocks an owned board (120000)
   const char *preferencesNamespace;   // NVS namespace for the lock ("atech_prov")

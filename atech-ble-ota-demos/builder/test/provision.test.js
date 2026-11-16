@@ -83,8 +83,8 @@ const crypto = require('node:crypto');
 test('frames fragment and reassemble at the pinned sizes', () => {
   const {fragment, createReassembler, MAX_FRAGMENT, MAX_MESSAGE} = AtechProvision;
   assert.equal(MAX_FRAGMENT, 240);
-  assert.equal(MAX_MESSAGE, 1024);
-  for (const size of [1, 240, 241, 1024]) {
+  assert.equal(MAX_MESSAGE, 6144);
+  for (const size of [1, 240, 241, 1024, 6144]) {
     const message = crypto.randomBytes(size);
     const frames = fragment(message);
     assert.equal(frames.length, Math.ceil(size / 240));
@@ -96,7 +96,7 @@ test('frames fragment and reassemble at the pinned sizes', () => {
     for (const frame of frames) out = reassembler.push(frame) || out;
     assert.deepEqual(Buffer.from(out), message, `${size} bytes round trip`);
   }
-  assert.throws(() => fragment(crypto.randomBytes(1025)), /1024/);
+  assert.throws(() => fragment(crypto.randomBytes(6145)), /6144/);
   const frames = fragment(crypto.randomBytes(500));
   const reassembler = createReassembler();
   assert.equal(reassembler.push(frames[0]), null);
@@ -128,7 +128,7 @@ test('hello agrees on a key with the board and exposes the lock flags and the tr
   const expected = crypto.createHash('sha256').update(Buffer.concat([board.state.lastClientPub, board.state.lastBoardPub])).digest('hex');
   assert.equal(hello.transcript, expected);
   assert.equal(hello.transcript, await AtechProvision.transcriptHex(board.state.lastClientPub, board.state.lastBoardPub));
-  assert.deepEqual(await session.scan(), [{ssid: 'Home', rssi: -50, open: false}]);
+  assert.deepEqual(await session.scan(), [{ssid: 'Home', rssi: -50, open: false, enterprise: false}]);
   session.close();
 });
 
@@ -219,9 +219,70 @@ test('hello and scan still answer while a transfer owns flash; only changes are 
   const session = link(board);
   const hello = await session.hello();
   assert.match(hello.nonce, /^[0-9a-f]{32}$/);
-  assert.deepEqual(await session.scan(), [{ssid: 'Home', rssi: -50, open: false}]);
+  assert.deepEqual(await session.scan(), [{ssid: 'Home', rssi: -50, open: false, enterprise: false}]);
   const refused = await session.provision({url: 'https://api.example'});
   assert.equal(refused.ok, false);
   assert.match(refused.error, /busy/);
   session.close();
+});
+
+const CA_PEM = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVoCAQEwCgYIKoZIzj0EAwIwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgM\n-----END CERTIFICATE-----\n';
+const CRT_PEM = '-----BEGIN CERTIFICATE-----\nMIIBclient\n-----END CERTIFICATE-----\n';
+const KEY_PEM = '-----BEGIN PRIVATE KEY-----\nMIGHAgEAkey\n-----END PRIVATE KEY-----\n';
+const CA_REFUSAL = 'Enterprise Wi-Fi needs a trusted CA certificate (PEM) or the built-in bundle; certificate checking is never disabled';
+
+test('the reference board stores an enterprise profile and refuses one without a CA', async () => {
+  const board = createFakeProvBoard({id: BOARD, token: SECRET});
+  const session = link(board);
+  await session.hello();
+  assert.deepEqual(await session.provision({ssid: 'Campus', auth: 'peap', user: 'student', pass: 'campus-secret', ident: 'anonymous@campus.edu'}),
+                   {ok: false, error: CA_REFUSAL});
+  assert.equal(board.state.ssid, '', 'nothing stored');
+  assert.deepEqual(await session.provision({ssid: 'Campus', auth: 'peap', pass: 'campus-secret', ca_bundle: true}),
+                   {ok: false, error: 'PEAP and TTLS need a username and password'});
+  assert.deepEqual(await session.provision({ssid: 'Campus', auth: 'tls', ident: 'device@campus.edu', ca: CA_PEM}),
+                   {ok: false, error: 'EAP-TLS needs a client certificate and its private key'});
+  assert.deepEqual(await session.provision({ssid: 'Campus', auth: 'wep', pass: 'x'}), {ok: false, error: 'Unknown Wi-Fi security method'});
+
+  const peap = await session.provision({ssid: 'Campus', auth: 'peap', user: 'student', pass: 'campus-secret', ident: 'anonymous@campus.edu', ca: CA_PEM, domain: 'radius.campus.edu'});
+  assert.deepEqual(peap, {ok: true, joining: true});
+  assert.deepEqual(board.state.profile, {ssid: 'Campus', auth: 'peap', identity: 'anonymous@campus.edu', username: 'student', ca: CA_PEM, cert: '', key: '', phase2: 'mschapv2', domain: 'radius.campus.edu', caBundle: false});
+  assert.equal(board.state.pass, 'campus-secret');
+  assert.ok(board.state.requests.every(r => r.pass === undefined || r.pass === '<redacted>'), 'the password is never kept in the request log');
+
+  const ttls = await session.provision({ssid: 'Campus', auth: 'ttls', user: 'student', pass: 'campus-secret', ph2: 'pap', ca_bundle: true});
+  assert.deepEqual(ttls, {ok: true, joining: true});
+  assert.equal(board.state.profile.phase2, 'pap');
+  assert.equal(board.state.profile.caBundle, true);
+  assert.equal(board.state.profile.ca, '');
+
+  const tls = await session.provision({ssid: 'Campus', auth: 'tls', ident: 'device@campus.edu', ca: CA_PEM, crt: CRT_PEM, key: KEY_PEM});
+  assert.deepEqual(tls, {ok: true, joining: true});
+  assert.equal(board.state.profile.cert, CRT_PEM);
+  assert.equal(board.state.profile.key, KEY_PEM);
+  assert.equal(board.state.pass, '');
+
+  const personal = await session.provision({ssid: 'Home', pass: 'secret123'});
+  assert.deepEqual(personal, {ok: true, joining: true});
+  assert.equal(board.state.profile.auth, 'personal');
+  assert.equal(board.state.profile.ca, '', 'a personal profile clears the enterprise fields');
+
+  const withHotspot = await session.provision({hotspot: true});
+  assert.deepEqual(withHotspot, {ok: true, joining: false, apSsid: board.state.apSsid, apPass: board.state.apPass});
+  assert.match(board.state.apSsid, /^ATECH-[0-9A-F]{6}$/);
+  session.close();
+});
+
+test('the reference board refuses oversize certificates with the texts the firmware uses', async () => {
+  const {buildProfile} = require('../lib/fake-prov-board');
+  const board = createFakeProvBoard({id: BOARD, token: SECRET});
+  const session = link(board);
+  await session.hello();
+  const big = '-----BEGIN CERTIFICATE-----\n' + 'A'.repeat(4200) + '\n-----END CERTIFICATE-----\n';
+  assert.deepEqual(await session.provision({ssid: 'Campus', auth: 'peap', user: 'student', pass: 'campus-secret', ca: big}),
+                   {ok: false, error: 'A certificate or key is too long (4 KiB limit)'});
+  assert.equal(board.state.ssid, '', 'nothing stored');
+  const chain = '-----BEGIN CERTIFICATE-----\n' + 'B'.repeat(3900) + '\n-----END CERTIFICATE-----\n';
+  assert.deepEqual(buildProfile({ssid: 'Campus', auth: 'tls', ident: 'device@campus.edu', ca: chain, crt: chain, key: chain.replace(/CERTIFICATE/g, 'PRIVATE KEY')}),
+                   {error: 'Certificates and key together exceed 10 KiB; use a shorter CA chain or the built-in bundle'});
 });

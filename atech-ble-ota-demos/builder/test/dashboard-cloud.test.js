@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {JSDOM, VirtualConsole} = require('jsdom');
 const {loadConfig} = require('../lib/config');
+const {buildPackage} = require('../lib/signing');
 
 const config = loadConfig({});
 const openWindows = [];
@@ -59,7 +60,8 @@ function fakeFetch(routes, calls = []) {
     const route = typeof routes[key] === 'function' ? routes[key](init) : routes[key];
     if (!route) return {ok: false, status: 404, json: async () => ({error: 'not found'}), clone() { return this; }};
     const status = route.status || 200;
-    return {ok: status < 400, status, json: async () => route.body ?? route, arrayBuffer: async () => new ArrayBuffer(1000),
+    const bytes = route.bytes ? route.bytes.buffer.slice(route.bytes.byteOffset, route.bytes.byteOffset + route.bytes.byteLength) : new ArrayBuffer(1000);
+    return {ok: status < 400, status, json: async () => route.body ?? route, arrayBuffer: async () => bytes,
             headers: new Map(), clone() { return this; }};
   };
 }
@@ -129,7 +131,9 @@ test('hosted dashboard lists registered boards with last seen and offers the cla
   assert.equal(offline.doc.getElementById('devBadge').textContent, 'Offline');
   assert.match(offline.doc.getElementById('devStatus').textContent, /Last seen 2 h ago/);
   assert.match(offline.doc.getElementById('methodWifiNote').textContent, /is offline \(last seen 2 h ago\); the job waits for it/);
-  assert.equal(offline.doc.body.dataset.deployMethod, 'wifi', 'a claimed but offline board can still be given a job');
+  assert.equal(offline.doc.body.dataset.deployMethod, 'hotspot', 'an offline board defaults to the local update; the cloud queue stays one click away');
+  offline.doc.getElementById('methodWifi').click();
+  assert.equal(offline.doc.body.dataset.deployMethod, 'wifi', 'a claimed but offline board can still be given a cloud job');
 });
 
 test('hosted dashboard without any board explains claiming', async () => {
@@ -196,7 +200,7 @@ test('cloud deploy posts via cloud and renders every state', async () => {
   assert.equal(doc.getElementById('stepDeploy').dataset.state, 'done');
 });
 
-test('a failed cloud job is reported with the failed badge and Bluetooth is offered when connected', async () => {
+test('a failed cloud job is reported with the failed badge and the local update is offered', async () => {
   const {doc} = await bootDashboard(1, {connected: true, routes: {
     '/api/devices': {devices: [cloudDevice()], unclaimed: []},
     '/api/builds': {status: 202, body: {id: 'job1', buildId: 'deadbeef', appVersion: 3}},
@@ -209,11 +213,11 @@ test('a failed cloud job is reported with the failed badge and Bluetooth is offe
   await wait(200);
   assert.equal(doc.getElementById('deployBadge').textContent, 'Failed');
   assert.match(doc.getElementById('deployStatus').textContent, /Cloud Wi-Fi deployment not verified: The board rolled back to build stock/);
-  assert.match(doc.getElementById('deployStatus').textContent, /Bluetooth is available: choose it above and click Deploy again/);
+  assert.match(doc.getElementById('deployStatus').textContent, /local Wi-Fi update is available: choose it above and click Deploy again/i);
   assert.equal(doc.body.dataset.deployMethod, 'wifi', 'nothing switches transports by itself');
-  doc.getElementById('methodBle').click();
-  assert.equal(doc.body.dataset.deployMethod, 'ble');
-  assert.match(doc.getElementById('aiDeploy').textContent, /Deploy over Bluetooth/);
+  doc.getElementById('methodHotspot').click();
+  assert.equal(doc.body.dataset.deployMethod, 'hotspot');
+  assert.match(doc.getElementById('aiDeploy').textContent, /local Wi-Fi update/i);
 });
 
 test('cloud board of the other demo keeps Wi-Fi unavailable', async () => {
@@ -223,26 +227,23 @@ test('cloud board of the other demo keeps Wi-Fi unavailable', async () => {
   assert.equal(doc.getElementById('methodWifi').classList.contains('unavailable'), true);
 });
 
-test('Bluetooth deploy and the firmware download fallback are unchanged on the hosted dashboard', async () => {
+test('a connected Bluetooth board is not a firmware transport on the hosted dashboard; the local update and the raw download remain', async () => {
   const {doc, calls} = await bootDashboard(1, {connected: true, calls: [], routes: {
     '/api/builds': {status: 202, body: {id: 'job1', buildId: 'deadbeef', appVersion: 3}}, '/api/builds/job1': job('ready'),
   }});
-  assert.equal(doc.body.dataset.deployMethod, 'ble');
+  assert.equal(doc.body.dataset.deployMethod, 'hotspot');
   await buildAndGetReady(doc);
-  assert.match(doc.getElementById('aiDeploy').textContent, /Deploy over Bluetooth/);
+  assert.match(doc.getElementById('aiDeploy').textContent, /local Wi-Fi update/i);
   const download = doc.getElementById('aiDownload');
   assert.equal(download.hidden, false);
   assert.ok(download.getAttribute('href').endsWith('/api/builds/job1/firmware.bin'));
   assert.ok(calls.every(c => !('x-atech-key' in c.headers)));
-  doc.getElementById('methodHotspot').click();
-  assert.match(doc.getElementById('aiDeploy').textContent, /Download firmware for the hotspot portal/);
 });
 
 test('Safari with a claimed board deploys through the cloud without Web Bluetooth', async () => {
   const {doc} = await bootDashboard(1, {bluetooth: false, routes: {'/api/devices': {devices: [cloudDevice()], unclaimed: []}}});
   assert.equal(doc.body.dataset.deployMethod, 'wifi');
   assert.equal(doc.getElementById('aiBrowserNote').hidden, true);
-  assert.match(doc.getElementById('methodBleNote').textContent, /No Web Bluetooth/);
   assert.equal(doc.getElementById('connect').disabled, true);
 });
 
@@ -284,3 +285,104 @@ test('reloading the hosted dashboard re-attaches to the active cloud job of the 
   assert.equal(doc.getElementById('deployBadge').textContent, 'Succeeded');
   assert.equal(doc.getElementById('deployAbort').hidden, true);
 });
+
+test('a captive board says it needs a sign-in', async () => {
+  const captive = cloudDevice({online: false, cloud: {registered: true, online: false, lastSeenAt: ago(600000), lastReport: {build: 'stock', internet: 'captive', transport: 'hotspot', hotspotActive: true}, lastAuthFailureAt: null, verified: true},
+                               identity: identity({wifi: {ssid: 'Campus', ip: '10.1.2.3', rssi: -60, hostname: 'atech-d4e5f6', mdns: '', port: 8080, connected: true, transferring: false, lastTransferError: '', lastTransferMs: 0,
+                                                          internet: 'captive', captiveUrl: 'http://portal.campus.edu/login', transport: 'hotspot', hotspot: true, mac: 'A1:B2:C3:D4:E5:F6', auth: 'peap'}})});
+  const {doc, errors} = await bootDashboard(1, {routes: {'/api/devices': {devices: [captive], unclaimed: []}}});
+  assert.deepEqual(errors, []);
+  await wait(60);
+  assert.match(doc.getElementById('devStatus').textContent, /needs a sign-in/i, 'the captive network is named as the reason');
+  assert.match(doc.getElementById('devWifi').textContent, /Campus/);
+  assert.match(doc.getElementById('devWifi').textContent, /sign-in/i);
+});
+
+test('an offline cloud board shows the local update flow with the hotspot credentials and completes when the board reports the new build', async () => {
+  const offline = cloudDevice({online: false, hotspot: {ssid: 'ATECH-D4E5F6'},
+                               cloud: {registered: true, online: false, lastSeenAt: ago(300000), lastReport: {build: 'stock', transport: 'hotspot', hotspotActive: true}, lastAuthFailureAt: null, verified: true},
+                               identity: identity({wifi: {...identity().wifi, hostname: 'atech-d4e5f6', transport: 'hotspot', transportReason: 'offline', hotspot: true}})});
+  let devices = [offline];
+  const calls = [];
+  const {doc, errors} = await bootDashboard(1, {calls, routes: {
+    '/api/devices': () => ({devices, unclaimed: []}),
+    '/api/builds': {status: 202, body: {id: 'job1', buildId: 'deadbeef', appVersion: 3}}, '/api/builds/job1': job('ready'),
+    [`/api/devices/${BOARD}/local-credentials`]: {ssid: 'ATECH-D4E5F6', pass: 'hotspot-secret-123', token: 'fixture-ota-token-0123456789', hostname: 'atech-d4e5f6'},
+    '/api/builds/job1/package': {bytes: buildPackage({image: Buffer.alloc(1000, 7), header: {v: 1, build: 'deadbeef', demo: 1, size: 1000, sha256: 'x'.repeat(64), version: 3, ver: 3,
+                                                       downgrade: false, target: BOARD, sig: 'ab'.repeat(64), kid: '00000000', pub: '04' + '00'.repeat(64), app: 'Blink'}})},
+  }});
+  assert.deepEqual(errors, []);
+  await buildAndGetReady(doc);
+  assert.equal(doc.body.dataset.deployMethod, 'hotspot');
+  assert.equal(doc.getElementById('deployBadge').textContent, 'Device offline: local Wi-Fi update available');
+  assert.match(doc.getElementById('methodHotspotNote').textContent, /offline/i);
+  assert.match(doc.getElementById('aiDeploy').textContent, /local Wi-Fi update/i);
+  doc.getElementById('aiDeploy').click();
+  await wait(120);
+  assert.equal(doc.getElementById('localPanel').hidden, false);
+  assert.equal(doc.getElementById('localSsid').textContent, 'ATECH-D4E5F6');
+  assert.equal(doc.getElementById('localPass').textContent, 'hotspot-secret-123');
+  assert.equal(doc.getElementById('localToken').textContent, 'fixture-ota-token-0123456789');
+  assert.match(doc.getElementById('localHost').textContent, /atech-d4e5f6\.local/);
+  assert.equal(calls.filter(c => c.url === '/api/builds/job1/package').length, 0, 'nothing is downloaded until the user prepares the update');
+  doc.getElementById('localPrepare').click();
+  await wait(120);
+  const pkg = calls.find(c => c.url === '/api/builds/job1/package');
+  assert.ok(pkg, 'the signed package is fetched from the backend');
+  assert.match(doc.getElementById('localState').textContent, /atech-demo1-deadbeef\.atech/);
+  devices = [cloudDevice({...offline, online: true, build: 'deadbeef', cloud: {...offline.cloud, online: true, lastSeenAt: ago(1000), lastReport: {build: 'deadbeef', transport: 'cloud'}},
+                           identity: identity({build: 'deadbeef', app: 'Blink', ver: 3})})];
+  await until(() => doc.getElementById('deployBadge').textContent === 'Update complete', 4000);
+  assert.match(doc.getElementById('localDone').textContent, /running build deadbeef/);
+  assert.match(doc.getElementById('deployStatus').textContent, /Update complete/);
+});
+
+test('a lower version asks for confirmation before deploying', async () => {
+  const calls = [];
+  const newer = cloudDevice({identity: identity({ver: 5, app: 'Later'}), cloud: {registered: true, online: true, lastSeenAt: ago(2000), lastReport: {build: 'stock', maxVersion: 5}, lastAuthFailureAt: null, verified: true}});
+  const {doc} = await bootDashboard(1, {calls, routes: {
+    '/api/devices': {devices: [newer], unclaimed: []},
+    '/api/builds': {status: 202, body: {id: 'job1', buildId: 'deadbeef', appVersion: 3}}, '/api/builds/job1': job('ready'),
+    '/api/builds/job1/deploy': {status: 202, body: {id: 'dep1', deployment: cloudJob('pending'), transport: 'cloud'}},
+    '/api/deployments/dep1': sequence([cloudJob('pending'), cloudJob('succeeded', {after: {build: 'deadbeef'}, timings: {totalMs: 5000}})]),
+  }});
+  await buildAndGetReady(doc);
+  doc.getElementById('aiDeploy').click();
+  await wait(60);
+  assert.match(doc.getElementById('deployStatus').textContent, /version 3 .*version 5.*older version/);
+  assert.equal(calls.filter(c => c.url === '/api/builds/job1/deploy').length, 0, 'nothing is deployed before the confirmation');
+  doc.getElementById('aiDeploy').click();
+  await wait(200);
+  const deploy = calls.find(c => c.url === '/api/builds/job1/deploy');
+  assert.deepEqual(deploy.body, {deviceId: BOARD, via: 'cloud', allowDowngrade: true});
+  assert.equal(doc.getElementById('deployBadge').textContent, 'Succeeded');
+});
+
+test('a downgrade confirmation expires after a minute', async () => {
+  const calls = [];
+  const newer = cloudDevice({identity: identity({ver: 5, app: 'Later'}), cloud: {registered: true, online: true, lastSeenAt: ago(2000), lastReport: {build: 'stock', maxVersion: 5}, lastAuthFailureAt: null, verified: true}});
+  const {doc, window} = await bootDashboard(1, {calls, routes: {
+    '/api/devices': {devices: [newer], unclaimed: []},
+    '/api/builds': {status: 202, body: {id: 'job1', buildId: 'deadbeef', appVersion: 3}}, '/api/builds/job1': job('ready'),
+    '/api/builds/job1/deploy': {status: 202, body: {id: 'dep1', deployment: cloudJob('pending'), transport: 'cloud'}},
+    '/api/deployments/dep1': cloudJob('succeeded', {after: {build: 'deadbeef'}}),
+  }});
+  await buildAndGetReady(doc);
+  doc.getElementById('aiDeploy').click();
+  await wait(60);
+  assert.match(doc.getElementById('deployStatus').textContent, /older version/);
+  const realNow = window.Date.now;
+  window.Date.now = () => realNow() + 61000;
+  try {
+    doc.getElementById('aiDeploy').click();
+    await wait(60);
+    assert.equal(calls.filter(c => c.url === '/api/builds/job1/deploy').length, 0, 'a stale confirmation does not deploy; the warning is shown again');
+    assert.match(doc.getElementById('deployStatus').textContent, /older version/);
+  } finally { window.Date.now = realNow; }
+});
+
+async function until(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) { if (predicate()) return true; await wait(20); }
+  throw new Error(`timed out waiting for ${predicate.toString().slice(0, 100)}`);
+}

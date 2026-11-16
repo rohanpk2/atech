@@ -107,3 +107,21 @@ test('buildFlagsEnv bakes the public URL into the installer base build with quot
   // PLATFORMIO_BUILD_FLAGS goes through shlex: the outer single quotes keep the inner double quotes.
   assert.deepEqual(buildFlagsEnv({publicUrl: 'https://a.b'}), {PLATFORMIO_BUILD_FLAGS: '\'-DATECH_CLOUD_URL="https://a.b"\''});
 });
+
+test('rewritePlatformioIni bakes the signing public key into the AI environment only', () => {
+  const pub = '04' + 'ab'.repeat(64);
+  const out = rewritePlatformioIni(demo1Ini, {sharedDir: '/s', cacheDir: '/c', cloudUrl: 'https://api.example.com', signingKey: pub});
+  const ai = out.slice(out.indexOf('[env:ai]'));
+  assert.match(ai, new RegExp(`'-DATECH_CLOUD_URL="https://api\\.example\\.com"' '-DATECH_FW_PUBKEY="${pub}"'$`, 'm'));
+  assert.doesNotMatch(out.slice(0, out.indexOf('[env:ai]')), /ATECH_FW_PUBKEY/);
+  const keyOnly = rewritePlatformioIni(demo1Ini, {sharedDir: '/s', cacheDir: '/c', signingKey: pub});
+  assert.match(keyOnly.slice(keyOnly.indexOf('[env:ai]')), /-DATECH_AI_BUILD=1 '-DATECH_FW_PUBKEY="04abab/);
+  assert.doesNotMatch(rewritePlatformioIni(demo1Ini, {sharedDir: '/s', cacheDir: '/c'}), /ATECH_FW_PUBKEY/);
+});
+
+test('prepareWorkspace passes the signing public key through to the workspace ini', async () => {
+  const config = {...tempConfig(), publicUrl: 'https://api.example.com', signingPublicKey: '04' + 'ab'.repeat(64)};
+  const {dir} = await prepareWorkspace(1, {code: '// app', meta: {buildId: 'deadbeef', appName: 'Test', appVersion: 3, targetDeviceId: ''}}, {config});
+  const ini = fs.readFileSync(path.join(dir, 'platformio.ini'), 'utf8');
+  assert.match(ini, /\[env:ai\][\s\S]*ATECH_FW_PUBKEY="04abab/);
+});

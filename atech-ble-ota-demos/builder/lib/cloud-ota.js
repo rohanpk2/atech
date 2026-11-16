@@ -9,11 +9,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {loadConfig} = require('./config');
 const {validateImage} = require('./image');
-const {AGENT_MARKER, PROV_MARKER} = require('./jobs');
+const {AGENT_MARKER, PROV_MARKER, SIGN_MARKER} = require('./jobs');
 const {canAccess} = require('./devices');
 const {normalizeReport} = require('./cloud-devices');
 const {newJobId, CloudError} = require('./cloud-auth');
 const {sha256Hex} = require('./lan-auth');
+const {createSigner, manifestFor} = require('./signing');
 
 const STATES = ['pending', 'downloading', 'installing', 'rebooting', 'succeeded', 'failed', 'cancelled'];
 const ACTIVE = new Set(['pending', 'downloading', 'installing', 'rebooting']);
@@ -44,11 +45,13 @@ function parseRange(header, size) {
 }
 
 class CloudDeploymentStore {
-  constructor({config = loadConfig(), jobs, devices, cloud, now = Date.now, log = () => {}}) {
+  constructor({config = loadConfig(), jobs, devices, cloud, signer = null, now = Date.now, log = () => {}}) {
     this.config = config;
     this.jobs = jobs;
     this.devices = devices;
     this.cloud = cloud;
+    // Every job carries a manifest signed for the board it is addressed to (shared/AtechFwSign verifies it).
+    this.signer = signer || createSigner({file: config.signingKeyFile});
     this.now = now;
     this.log = log;
     this.file = path.join(config.buildsDir, 'cloud-deployments.json');
@@ -111,7 +114,7 @@ class CloudDeploymentStore {
     return [...this.deployments.values()].find(d => d.deviceId === deviceId && ACTIVE.has(d.state)) || null;
   }
 
-  create({jobId, deviceId, ownerId = null}) {
+  create({jobId, deviceId, ownerId = null, allowDowngrade = false}) {
     const job = this.jobs.get(jobId);
     if (!job) throw new CloudError(400, 'bad_request', `Unknown build ${jobId}`);
     if (job.state !== 'ready' || !job.firmware) throw new CloudError(400, 'bad_request', `Build ${job.buildId} is ${job.state}; only a ready build can be deployed`);
@@ -130,12 +133,12 @@ class CloudDeploymentStore {
     const image = fs.readFileSync(file);
     const entry = this.config.demos[job.demo];
     const validation = validateImage(image, {slotSize: this.config.slotSize, sizeMargin: this.config.sizeMargin,
-                                             markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER]});
+                                             markers: [entry.imageIdentity, `ATECH-BUILD:${job.buildId}`, AGENT_MARKER, PROV_MARKER, SIGN_MARKER]});
     if (!validation.ok) {
-      const missingCore = validation.errors.some(e => e.includes(PROV_MARKER) || e.includes(AGENT_MARKER));
+      const missingCore = validation.errors.some(e => e.includes(PROV_MARKER) || e.includes(AGENT_MARKER) || e.includes(SIGN_MARKER));
       if (missingCore) {
-        throw new CloudError(400, 'rebuild', `Build ${job.buildId} was made before 2026-10-29 and lacks the Bluetooth setup or cloud agent service; ` +
-                                             'generate it again (or rebuild the stock app) before deploying through the cloud');
+        throw new CloudError(400, 'rebuild', `Build ${job.buildId} predates the Bluetooth setup, cloud agent or firmware signature service; ` +
+                                             'generate it again (or rebuild the stock app) before deploying it');
       }
       throw new CloudError(400, 'bad_request', `Image validation failed: ${validation.errors.join('; ')}`);
     }
@@ -144,9 +147,13 @@ class CloudDeploymentStore {
     const active = this.activeFor(deviceId);
     if (active) throw new CloudError(409, 'duplicate', `Deployment ${active.id} (${active.state}) is still active for ${deviceId}; wait for it or cancel it`);
     const now = this.now();
+    const version = Number(job.appVersion) || 0;
+    const downgrade = Boolean(allowDowngrade);
+    const signature = this.signer.sign(manifestFor({buildId: job.buildId, demo: job.demo, size: image.length, sha256, version, deviceId, downgrade}));
     const d = {
       id: newJobId(), transport: 'cloud', jobId, buildId: job.buildId, appName: job.appName, appVersion: job.appVersion, demo: job.demo,
       deviceId, ownerId, state: 'pending', stage: STAGES.pending, total: image.length, sha256, received: 0, percent: 0, attempts: 0,
+      version, downgrade, signature, kid: this.signer.keyId(),
       nextOffset: 0, error: null, reason: null, checks: [], timings: {}, createdAt: this.iso(now), updatedAt: this.iso(now),
       expiresAt: this.iso(now + this.config.cloud.jobTtlMs), claimedAt: null, installingAt: null, rebootingAt: null, ackAt: null,
       lastReportAt: null, finishedAt: null, before: {build: lastReport.build || record.build || null}, after: {build: null}, note: null, heap: null,
@@ -202,9 +209,11 @@ class CloudDeploymentStore {
     return count;
   }
 
+  // What the board receives with its poll: the download path plus the signed manifest fields.
   manifest(d) {
-    return {job: d.id, build: d.buildId, size: d.total, sha256: d.sha256, demo: d.demo, app: d.appName || '', ver: d.appVersion || 0,
-            url: `/api/device/jobs/${d.id}/firmware`, chunk: this.config.cloud.chunkBytes};
+    return {job: d.id, build: d.buildId, size: d.total, sha256: d.sha256, demo: d.demo, app: d.appName || '', ver: d.version ?? d.appVersion ?? 0,
+            url: `/api/device/jobs/${d.id}/firmware`, chunk: this.config.cloud.chunkBytes,
+            sig: d.signature || '', dg: d.downgrade ? 1 : 0, kid: d.kid || '', target: d.deviceId};
   }
 
   // The board's poll: hand out the next job when the board is ready, and decide what a board

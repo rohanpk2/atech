@@ -8,6 +8,7 @@
 #include <AtechBleProv.h>
 #include <AtechCloudOta.h>
 #include <AtechCore.h>
+#include <AtechFwSign.h>
 #include <AtechSync.h>
 #include <AtechWifiLan.h>
 #include <AtechWifiOta.h>
@@ -34,6 +35,21 @@
 #endif
 #ifndef ATECH_CLOUD_ALLOW_HTTP
 #define ATECH_CLOUD_ALLOW_HTTP 0
+#endif
+// Firmware signing: the build service's public key (130 hex), baked in by the backend; a board
+// without one pins the key at its first authenticated contact. ATECH_ALLOW_UNSIGNED=1 accepts
+// unsigned images (lab builds only; never ship it).
+#ifndef ATECH_FW_PUBKEY
+#define ATECH_FW_PUBKEY ""
+#endif
+#ifndef ATECH_ALLOW_UNSIGNED
+#define ATECH_ALLOW_UNSIGNED 0
+#endif
+// The demo's original Bluetooth OTA writer compiles only for a lab build (-DATECH_BLE_OTA_DEMO=1).
+// The default image never takes firmware over Bluetooth: Wi-Fi (cloud, LAN, the board's hotspot
+// page) is the only path, and every one of them goes through the signed atech::ImageSink.
+#ifndef ATECH_BLE_OTA_DEMO
+#define ATECH_BLE_OTA_DEMO 0
 #endif
 
 #define ATECH_STR_(value) #value
@@ -70,8 +86,10 @@ bool wifiUploadWasActive = false;
 bool lanTransferWasActive = false;
 String bleDeviceName;
 
+// The hotspot may not start while another transport owns flash; a merely connected Bluetooth client
+// does not block it (Bluetooth setup and the hotspot coexist).
 bool otherOtaBusy() {
-  return connected || BLEOTA.isRunning() || wifiLan.isTransferring() || cloudOta.isTransferring();
+  return BLEOTA.isRunning() || wifiLan.isTransferring() || cloudOta.isTransferring();
 }
 
 bool anyOtaBusy() {
@@ -124,17 +142,16 @@ String syncIdentity() { return boardSync.statusJson(); }
 String syncReport() { return boardSync.compactStatusJson(); }
 void syncCloudCommand(const String &form) { boardSync.command(form, true); }
 String cloudIdentity() { return cloudOta.statusJson(); }
+String transportIdentity() { return wifiOta.transportJson(); }
+String transportReport() { return wifiOta.transportReport(); }
+// The hotspot credentials ride on the cloud login so the owner's dashboard can show them for a local update.
+String hotspotReport() { return wifiOta.hotspotReport(); }
 bool homeWifiConnected() { return wifiLan.isConnected(); }
+const char *internetStateHook() { return wifiLan.internetState(); }
+void internetRecheckHook() { wifiLan.recheckInternet(); }
 
-void wifiOtaModeChanged(bool active) {
-  if (active) {
-    BLEDevice::stopAdvertising();
-    Serial.println("BLE advertising paused for exclusive Wi-Fi OTA mode");
-  } else if (!connected && server != nullptr) {
-    server->startAdvertising();
-    Serial.println("BLE advertising restored after Wi-Fi OTA mode");
-  }
-}
+// Bluetooth stays available while the hotspot is up; advertising pauses only during an upload (see loop()).
+void wifiOtaModeChanged(bool) {}
 
 // gb88 declares the BLEOTACallbacks virtuals without defining them anywhere,
 // so the base vtable only exists if the sketch defines them (as the library's
@@ -144,7 +161,7 @@ void BLEOTACallbacks::beforeStartSPIFFS() {}
 void BLEOTACallbacks::afterStop() {}
 void BLEOTACallbacks::afterAbort() {}
 
-// gb88 runs these from BLEOTA.process() on the main loop.
+// gb88 runs these from the library's process loop on the main task (lab builds only).
 class OtaCallbacks : public BLEOTACallbacks {
   void beforeStartOTA() override {
     atech::coreSuspendApp();
@@ -195,11 +212,14 @@ void setup() {
   if (!atech::coreBegin(coreConfig)) {
     Serial.println("Atech core initialization failed");
   }
+  // Signature verification for every install path (cloud, LAN, hotspot) through atech::ImageSink.
+  atech::fwsign::begin(ATECH_FW_PUBKEY, ATECH_ALLOW_UNSIGNED != 0);
 
   bleDeviceName = atech::bleName(BLE_NAME_PREFIX);
   BLEDevice::init(bleDeviceName);
   server = BLEDevice::createServer();
   server->setCallbacks(new Callbacks());
+#if ATECH_BLE_OTA_DEMO
   BLEOTA.begin(server);
   BLEOTA.setModel("Atech-ESP32-S3-N16R8");
   BLEOTA.setSerialNumber(atech::deviceId());
@@ -207,6 +227,7 @@ void setup() {
   BLEOTA.setManufactuer("Atech"); // Existing library's spelling.
   BLEOTA.setCallbacks(&otaCallbacks);
   BLEOTA.init();
+#endif
   // Identity, control and event characteristics shared with Demo 1.
   atech::coreAttachBle(server);
   // Bluetooth Wi-Fi setup (shared with Demo 1): see AtechBleProv.h.
@@ -215,6 +236,7 @@ void setup() {
   provConfig.lan = &wifiLan;
   provConfig.cloud = &cloudOta;
   provConfig.authToken = lanAuthToken;
+  provConfig.hotspotReport = hotspotReport;
   provConfig.busy = anyOtaBusy;
   provConfig.sync = &boardSync;
   provConfig.unlockWindowMs = 120000;
@@ -223,7 +245,9 @@ void setup() {
     Serial.printf("Bluetooth provisioning initialization failed: %s\n", bleProv.lastError().c_str());
   }
   BLEAdvertising *adv = BLEDevice::getAdvertising();
+#if ATECH_BLE_OTA_DEMO
   adv->addServiceUUID(BLEOTA.getBLEOTAuuid());
+#endif
   adv->setScanResponse(true);
 
   // Station-mode Wi-Fi, mDNS and the authenticated LAN OTA service. Started
@@ -241,6 +265,7 @@ void setup() {
   lanConfig.extraIdentity = cloudIdentity;
   lanConfig.syncCommand = syncCommandJson;
   lanConfig.syncIdentity = syncIdentity;
+  lanConfig.transportIdentity = transportIdentity;
   if (!wifiLan.begin(lanConfig)) {
     Serial.printf("Wi-Fi LAN service initialization failed: %s\n", wifiLan.lastError().c_str());
   }
@@ -276,6 +301,10 @@ void setup() {
   cloudConfig.wifiConnected = homeWifiConnected;
   cloudConfig.extraReport = syncReport;
   cloudConfig.command = syncCloudCommand;
+  cloudConfig.extraLogin = hotspotReport;
+  cloudConfig.extraPoll = transportReport;
+  cloudConfig.internetState = internetStateHook;
+  cloudConfig.internetRecheck = internetRecheckHook;
   if (!cloudOta.begin(cloudConfig)) {
     Serial.printf("Cloud OTA agent initialization failed: %s\n", cloudOta.lastError().c_str());
   }
@@ -285,7 +314,9 @@ void setup() {
   wifiOtaConfig.cloud = &cloudOta;
   wifiOtaConfig.deviceName = bleDeviceName.c_str();
   wifiOtaConfig.firmwareVersion = FIRMWARE_VERSION;
-  wifiOtaConfig.ssidPrefix = "Atech-OTA-D2";
+  wifiOtaConfig.demo = 2;
+  wifiOtaConfig.ssidPrefix = "ATECH";
+  wifiOtaConfig.hostnamePrefix = "atech";
   wifiOtaConfig.imageIdentity = WIFI_OTA_IMAGE_IDENTITY;
   wifiOtaConfig.preferencesNamespace = "atech_ota_d2";
   wifiOtaConfig.apPasswordOverride = ATECH_WIFI_AP_PASSWORD;
@@ -298,6 +329,9 @@ void setup() {
   wifiOtaConfig.otherOtaBusy = otherOtaBusy;
   wifiOtaConfig.modeChanged = wifiOtaModeChanged;
   wifiOtaConfig.shortPress = handleShortPress;
+  wifiOtaConfig.autoStart = true;
+  wifiOtaConfig.offlineGraceMs = 90000;
+  wifiOtaConfig.onlineGraceMs = 60000;
   if (!wifiOta.begin(wifiOtaConfig)) {
     Serial.printf("Wi-Fi OTA initialization failed: %s\n",
                   wifiOta.lastError().c_str());
@@ -315,12 +349,12 @@ void loop() {
   boardSync.loop();
   // A LAN or cloud transfer pauses advertising (not a connected client) so the
   // radio favours Wi-Fi, and resumes it afterwards unless the hotspot owns BLE.
-  const bool lanTransfer = wifiLan.isTransferring() || cloudOta.isTransferring();
+  const bool lanTransfer = wifiLan.isTransferring() || cloudOta.isTransferring() || wifiOta.isUpdating();
   if (lanTransfer != lanTransferWasActive) {
     lanTransferWasActive = lanTransfer;
     if (server) {
       if (lanTransfer) { if (!connected) BLEDevice::stopAdvertising(); }
-      else if (!connected && !wifiOta.isActive()) server->startAdvertising();
+      else if (!connected) server->startAdvertising();
     }
   }
   // The app pauses only while a Wi-Fi upload is actually streaming into flash.
@@ -339,11 +373,12 @@ void loop() {
     }
   }
 
-  // The shared portal owns the inactive partition while Wi-Fi mode is active.
-  // Keep gb88's protocol untouched, but do not service or re-advertise it until
-  // Wi-Fi exits. A connected/running BLE session prevents Wi-Fi from starting.
-  if (!wifiOta.isActive() && !lanTransfer) {
+  // Keep gb88's protocol untouched, but do not service or re-advertise it while a Wi-Fi transfer owns
+  // the flash (the lock arbitrates writers; a merely active hotspot does not block Bluetooth).
+  if (!lanTransfer) {
+#if ATECH_BLE_OTA_DEMO
     BLEOTA.process();
+#endif
     if (!connected && wasConnected) {
       delay(250);
       server->startAdvertising();

@@ -33,7 +33,9 @@ function clientIp(req) {
   return forwarded || (req.socket && req.socket.remoteAddress) || '?';
 }
 
-function createDeviceHandler({cloud, cloudDeployments, now = Date.now}) {
+function createDeviceHandler({cloud, cloudDeployments, signer = null, now = Date.now}) {
+  // The signing key the login answer announces is the one the job store signs with.
+  signer = signer || (cloudDeployments && cloudDeployments.signer) || null;
   return async function handleDeviceRequest(req, res, url) {
     const pathname = url.pathname;
     if (!pathname.startsWith('/api/device/')) return false;
@@ -47,7 +49,8 @@ function createDeviceHandler({cloud, cloudDeployments, now = Date.now}) {
       if (req.method === 'POST' && pathname === '/api/device/login') {
         const {id, nonce, proof, ...info} = await readForm(req);
         const result = await cloud.login({id, nonce, proof, info, ip});
-        sendKv(res, 200, {ok: 1, session: result.session, expires: result.expiresAt, poll: result.pollMs, server_time: now()});
+        sendKv(res, 200, {ok: 1, session: result.session, expires: result.expiresAt, poll: result.pollMs, server_time: now(),
+                          sign_key: signer ? signer.publicKeyHex() : '', sign_kid: signer ? signer.keyId() : ''});
         return true;
       }
       const {deviceId} = cloud.authenticate(req.headers.authorization);
@@ -60,6 +63,7 @@ function createDeviceHandler({cloud, cloudDeployments, now = Date.now}) {
           ok: 1, poll: result.pollMs, server_time: now(),
           job: job ? job.job : '', build: job ? job.build : '', size: job ? job.size : '', sha256: job ? job.sha256 : '', demo: job ? job.demo : '',
           app: job ? job.app : '', ver: job ? job.ver : '', url: job ? job.url : '', chunk: job ? job.chunk : '',
+          sig: job ? job.sig : '', dg: job ? job.dg : '', kid: job ? job.kid : '', target: job ? job.target : '',
           ack: result.ack ? result.ack.jobId : '', action: result.ack ? result.ack.action : '',
           sync: cloud.takeCommand(deviceId) || '',
         });

@@ -1,10 +1,11 @@
 'use strict';
 
 // Shared dashboard logic for both demos: the device panel, the AI firmware
-// builder card and the deployment panel. Deployment order is Wi-Fi (through
-// the builder backend on the same origin, so it works in Safari and Chrome),
-// then Bluetooth (the demo's own OTA protocol through `transport`), then the
-// board's hotspot portal (manual). A failed transfer is never retried on
+// builder card and the deployment panel. Firmware travels over Wi-Fi only:
+// through the cloud or the LAN when the board is reachable, otherwise as a
+// signed package the user prepares here and uploads on the board's own hotspot
+// page (the local Wi-Fi update). Bluetooth carries the one-time Wi-Fi setup and
+// the recovery controls, never firmware. A failed transfer is never retried on
 // another transport silently.
 //
 //   transport = {
@@ -13,7 +14,6 @@
 //     isConnected(): boolean,
 //     identity(): object | null,            // last identity read over BLE
 //     readIdentity(): Promise<object>,      // fresh read over BLE
-//     deploy(bytes, meta): Promise<{identity}>,  // BLE OTA + reboot + reconnect
 //     control(opcode): Promise<{status, statusText}>,
 //   }
 (function attachAtechBuilder(root) {
@@ -34,7 +34,17 @@
     ['preflight', 'Checks'], ['uploading', 'Transfer'], ['finishing', 'Image check'], ['rebooting', 'Reboot'],
     ['verifying', 'Verify app'], ['confirming', 'Confirm'], ['verified', 'Done'],
   ];
-  const METHOD_NAMES = {wifi: 'Wi-Fi', ble: 'Bluetooth', hotspot: 'Board hotspot'};
+  const METHOD_NAMES = {wifi: 'Wi-Fi', hotspot: 'Local Wi-Fi update'};
+  const OFFLINE_BADGE = 'Device offline: local Wi-Fi update available';
+  // The signed update package the backend serves and the board's hotspot page reads (builder/lib/signing.js).
+  const PACKAGE_MAGIC = 'ATECHPKG1\n';
+  const PACKAGE_MAX_HEADER = 8192;
+  const LOCAL_WATCH_MAX_MS = 30 * 60000;
+  // A downgrade confirmation (second Deploy click) is valid for a minute, for the board it was given for.
+  const DOWNGRADE_ARM_MS = 60000;
+  // Wi-Fi setup over Bluetooth: the board's certificate budget and the sealed message limit.
+  const PROV_PEM_MAX = 4096;
+  const PROV_MESSAGE_MAX = 6144;
   // Cloud jobs (the board pulls the image from the backend): states and copy.
   const CLOUD_PHASES = [['pending', 'Queued'], ['downloading', 'Download'], ['installing', 'Install'], ['rebooting', 'Reboot'], ['succeeded', 'Done']];
   const CLOUD_BADGES = {pending: 'Queued', offline: 'Offline', downloading: 'Downloading', installing: 'Installing', rebooting: 'Restarting',
@@ -142,11 +152,14 @@
       method: null,            // user-forced method or null for automatic
       deployment: null, deploySource: null, deployPollTimer: null, deployingVia: null, deployTransport: null,
       lastFailure: null,       // {method, message}
+      local: null,             // the local Wi-Fi update in progress: {jobId, phase, ssid, pass, token, hostname, fileName, fileUrl, offline}
+      localWatchTimer: null, localWatchUntil: 0,
+      downgradeConfirmed: null, // {jobId, deviceId, at}: the downgrade the user allowed, valid for DOWNGRADE_ARM_MS
       lastVerified: false,     // the current build has been deployed and verified
       bleProgress: null,
       publicUrl: null,         // the backend's public origin, provisioned into boards as the cloud server
       // Wi-Fi setup over Bluetooth: one encrypted session per connection, the board's last status.
-      prov: {session: null, status: null, busy: false, timer: null, joinUntil: 0, ticks: 0},
+      prov: {session: null, status: null, busy: false, timer: null, joinUntil: 0, ticks: 0, networks: []},
       // Board connections (AtechSync): the last status read over Bluetooth, the hook it came from,
       // the change subscription and the pairing code offered to the next board.
       sync: {status: null, busy: false, timer: null, unsubscribe: null, hookRef: null, hello: null, prefilled: '', armedUnpair: null},
@@ -206,7 +219,7 @@
 
     function renderSteps() {
       const avail = availability();
-      const connected = avail.wifi.ok || avail.ble.ok;
+      const connected = avail.wifi.ok || transport.isConnected();
       const job = state.job;
       const building = Boolean(job && !['ready', 'failed'].includes(job.state));
       const ready = Boolean(job && job.state === 'ready');
@@ -298,25 +311,41 @@
       return METHOD_NAMES[method] || method;
     }
 
-    function bleAvailability() {
-      if (!transport.bluetoothAvailable) return {ok: false, reason: 'No Web Bluetooth in this browser (Safari, or an insecure origin).'};
-      if (!transport.isConnected()) return {ok: false, reason: 'Click Connect Bluetooth to use the backup path.'};
-      const identity = transport.identity();
-      if (identity && identity.demo !== demo) return {ok: false, reason: `Connected board runs Demo ${identity.demo}.`};
-      return {ok: true, reason: `${identity ? identity.id : 'board'} connected over ${transport.name || 'Bluetooth'}`};
+    // A cloud-registered board the cloud has not heard from: by the board's own rules its hotspot is
+    // up (it starts 90 s after the cloud session is lost), so the local update is the natural path.
+    function offlineCloudBoard() {
+      const device = selectedDevice();
+      return Boolean(device && device.paired && reach(device) === 'cloud' && !device.online);
+    }
+
+    function hotspotSsid(device) {
+      if (device && device.hotspot && device.hotspot.ssid) return device.hotspot.ssid;
+      const suffix = device ? String(device.suffix || device.id.slice(-6)).toUpperCase() : '';
+      return suffix ? `ATECH-${suffix}` : 'ATECH-<suffix>';
+    }
+
+    function hotspotAvailability() {
+      const device = selectedDevice();
+      if (offlineCloudBoard()) {
+        return {ok: true, reason: `${device.name || device.id} is offline. Its hotspot ${hotspotSsid(device)} comes up by itself when it cannot reach the cloud: prepare the signed package here and upload it on the board's own page.`};
+      }
+      return {ok: true, reason: 'Prepare the signed package here, join the board\'s hotspot and upload it on the board\'s own page. Works in every browser.'};
     }
 
     function availability() {
-      return {wifi: wifiAvailability(), ble: bleAvailability(), hotspot: {ok: true, reason: 'Download the file and upload it on the board\'s own page.'}};
+      return {wifi: wifiAvailability(), hotspot: hotspotAvailability()};
     }
 
-    // The method Deploy will use: a user choice when it is available, otherwise
-    // the first available in priority order. Never changes during a transfer.
+    // The method Deploy will use: a user choice when it is available, otherwise the first available
+    // in priority order (Wi-Fi through the cloud or the LAN, then the local update). An offline cloud
+    // board defaults to the local update; queueing a cloud job for it stays one click away. Never
+    // changes during a transfer.
     function effectiveMethod() {
       const avail = availability();
       if (state.method && avail[state.method] && avail[state.method].ok) return state.method;
       if (state.method === 'hotspot') return 'hotspot';
-      for (const method of ['wifi', 'ble', 'hotspot']) if (avail[method].ok) return method;
+      if (offlineCloudBoard()) return 'hotspot';
+      for (const method of ['wifi', 'hotspot']) if (avail[method].ok) return method;
       return 'hotspot';
     }
 
@@ -334,7 +363,9 @@
         dot.className = `dot ${online ? 'online' : 'offline'}`;
         $('devBadge').textContent = online ? (device.simulated ? 'Online (simulated)' : 'Online via cloud') : 'Offline';
         $('devBadge').className = `badge ${online ? 'success' : 'error'}`;
+        const net = (device.identity && device.identity.wifi) || {};
         let status = online ? `Online through the cloud, seen ${lastSeen}.`
+          : net.internet === 'captive' ? `Offline. Its network${net.ssid ? ` (${net.ssid})` : ''} needs a sign-in before the board can reach the internet. Sign in through the board's hotspot page, register its MAC address${net.mac ? ` (${net.mac})` : ''} with IT, or use the local update.`
           : `Offline. Last seen ${lastSeen}. The board polls the cloud every 15 s when it is powered and on Wi-Fi.`;
         if (device.cloud && device.cloud.lastAuthFailureAt) status += ' The board\'s pairing token differs from the one entered; claim it again.';
         else if (device.cloud && device.cloud.verified === false) status += ' Waiting for its first contact to verify the pairing token.';
@@ -346,8 +377,9 @@
         dot.className = `dot ${online ? 'online' : device.paired ? 'offline' : 'unknown'}`;
         $('devBadge').textContent = online ? (device.simulated ? 'Online (simulated)' : 'Online over Wi-Fi') : device.paired ? 'Offline' : 'Not paired';
         $('devBadge').className = `badge ${online ? 'success' : device.paired ? 'error' : 'neutral'}`;
+        const lanNet = (online && device.identity.wifi) || {};
         $('devStatus').textContent = online
-          ? `Online at ${device.identity.wifi.ip || device.host} over Wi-Fi.`
+          ? `Online at ${device.identity.wifi.ip || device.host} over Wi-Fi.${lanNet.internet === 'captive' ? ' Its network needs a sign-in before the board can reach the internet.' : ''}`
           : device.paired ? `Not reachable right now${device.lastProbeError ? `: ${device.lastProbeError}` : ''}. Power the board and make sure it joined your Wi-Fi.`
                           : 'Pair this board with its OTA authorization code to deploy over Wi-Fi.';
         $('devForget').hidden = false;
@@ -379,7 +411,8 @@
       $('pairingCode').textContent = identity ? identity.suffix : (device ? (device.suffix || 'Unknown') : 'Unknown');
       const wifi = device && device.identity ? device.identity.wifi : null;
       const heap = identity && identity.heap ? `, ${formatBytes(identity.heap)} free RAM` : '';
-      $('devWifi').textContent = wifi ? (wifi.connected ? `${wifi.ssid || 'connected'} (${wifi.rssi} dBm)${heap}` : 'Not connected') : device ? 'Unknown (offline)' : 'Unknown';
+      const internetNote = wifi && wifi.internet === 'captive' ? ', needs a sign-in' : wifi && wifi.internet === 'offline' ? ', no internet' : '';
+      $('devWifi').textContent = wifi ? (wifi.connected ? `${wifi.ssid || 'connected'} (${wifi.rssi} dBm${wifi.auth && wifi.auth !== 'personal' ? `, ${wifi.auth.toUpperCase()}` : ''}${internetNote})${heap}` : 'Not connected') : device ? 'Unknown (offline)' : 'Unknown';
       $('devIp').textContent = via === 'cloud' ? 'Through the cloud (the board calls the build service)'
         : wifi && wifi.ip ? `${wifi.ip}:${wifi.port}` : device && device.host ? `${device.host} (last known)` : 'Unknown';
       $('firmwareVersion').textContent = identity ? identity.fw || 'Unknown' : device && device.firmware ? device.firmware : 'Unknown';
@@ -497,6 +530,7 @@
         return;
       }
       panel.hidden = false;
+      renderProvForm();
       const s = state.prov.status;
       const joining = state.prov.joinUntil > Date.now();
       let text;
@@ -548,14 +582,16 @@
       renderProv();
       try {
         const networks = await provSession().scan();
+        state.prov.networks = networks;
         const list = $('provNetworks');
         list.replaceChildren();
         for (const network of networks) {
           const option = doc.createElement('option');
           option.value = network.ssid;
-          option.label = `${network.rssi} dBm${network.open ? ', open' : ''}`;
+          option.label = `${network.rssi} dBm${network.open ? ', open' : network.enterprise ? ', enterprise' : ''}`;
           list.append(option);
         }
+        renderProvForm();
         $('provHint').textContent = networks.length
           ? `${networks.length} network${networks.length === 1 ? '' : 's'} found. Pick yours, enter its password and click Join Wi-Fi.`
           : 'No 2.4 GHz network found nearby. Type the network name.';
@@ -569,17 +605,84 @@
       }
     }
 
+    // Security method of the Wi-Fi setup form: personal, or an enterprise method with its fields.
+    function provAuth() { return $('provAuth').value || 'personal'; }
+
+    function renderProvForm() {
+      const auth = provAuth();
+      const enterprise = auth !== 'personal';
+      $('provEnterprise').hidden = !enterprise;
+      $('provPhase2').hidden = auth !== 'ttls';
+      $('provCert').parentElement.hidden = auth !== 'tls';
+      $('provKey').parentElement.hidden = auth !== 'tls';
+      $('provUsername').hidden = auth === 'tls';
+      $('provPassword').hidden = auth === 'tls';
+      $('provPassword').placeholder = enterprise ? 'Account password' : 'Wi-Fi password';
+    }
+
+    // The scan said whether a network is enterprise; typing or picking one preselects the method,
+    // which the user can still override.
+    function detectProvAuth() {
+      const ssid = $('provSsid').value.trim();
+      const network = state.prov.networks.find(n => n.ssid === ssid);
+      if (!network) return;
+      const current = provAuth();
+      if (network.enterprise && current === 'personal') $('provAuth').value = 'peap';
+      else if (!network.enterprise && current !== 'personal') $('provAuth').value = 'personal';
+      renderProvForm();
+    }
+
+    async function fileText(id) {
+      const file = $(id).files && $(id).files[0];
+      if (!file) return '';
+      const text = await file.text();
+      if (!/^-----BEGIN /m.test(text)) throw new Error(`${file.name} is not a PEM file`);
+      return text;
+    }
+
+    // Validates the form and builds the sealed request (every field a string; booleans 1/0).
+    async function provPayload(ssid, secret) {
+      const auth = provAuth();
+      if (auth === 'personal') {
+        if (secret && (secret.length < 8 || secret.length > 63)) throw Object.assign(new Error('Wi-Fi password must contain 8 to 63 characters (or be empty for an open network).'), {focus: 'provPassword'});
+        return {ssid, pass: secret};
+      }
+      const payload = {ssid, auth, ident: $('provIdentity').value.trim(), domain: $('provDomain').value.trim(), ca_bundle: $('provCaBundle').checked};
+      if (auth === 'peap' || auth === 'ttls') {
+        payload.user = $('provUsername').value.trim();
+        if (!payload.user) throw Object.assign(new Error('Enter the username for this network (PEAP and TTLS need a username and password).'), {focus: 'provUsername'});
+        if (!secret) throw Object.assign(new Error('Enter the account password for this network.'), {focus: 'provPassword'});
+        payload.pass = secret;
+        if (auth === 'ttls') payload.ph2 = $('provPhase2').value || 'mschapv2';
+      }
+      payload.ca = await fileText('provCa');
+      if (!payload.ca && !payload.ca_bundle) throw Object.assign(new Error('Choose the network\'s CA certificate (PEM) or trust the built-in bundle; the board never skips certificate checking.'), {focus: 'provCa'});
+      if (auth === 'tls') {
+        payload.crt = await fileText('provCert');
+        payload.key = await fileText('provKey');
+        if (!payload.crt || !payload.key) throw Object.assign(new Error('EAP-TLS needs the client certificate and its private key (PEM files).'), {focus: 'provCert'});
+        if (!payload.ident) throw Object.assign(new Error('EAP-TLS needs an identity (usually the certificate subject).'), {focus: 'provIdentity'});
+      }
+      // The board's budget (4 KiB per PEM, 10 KiB together) and the sealed Bluetooth message (6 KiB).
+      for (const [field, focus] of [['ca', 'provCa'], ['crt', 'provCert'], ['key', 'provKey']]) {
+        if (payload[field] && payload[field].length > PROV_PEM_MAX) throw Object.assign(new Error('A certificate or key is too long (4 KiB limit).'), {focus});
+      }
+      const encoded = new win.URLSearchParams(Object.entries(payload).map(([k, v]) => [k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v)])).toString();
+      if (encoded.length > PROV_MESSAGE_MAX) {
+        throw Object.assign(new Error(`This Wi-Fi profile is about ${Math.ceil(encoded.length / 1024)} KiB; the Bluetooth setup carries at most 6 KiB. Tick the built-in bundle, use a shorter CA chain, or enter the network on the board's hotspot page.`), {focus: 'provCa'});
+      }
+      return payload;
+    }
+
     async function joinWifi() {
       const hook = provisioning();
       if (!hook || state.prov.busy) return;
       const ssid = $('provSsid').value.trim();
       const secret = $('provPassword').value;
       if (!ssid || ssid.length > 32) { $('provHint').textContent = 'Enter the network name (1 to 32 characters).'; $('provSsid').focus(); return; }
-      if (secret && (secret.length < 8 || secret.length > 63)) {
-        $('provHint').textContent = 'Wi-Fi password must contain 8 to 63 characters (or be empty for an open network).';
-        $('provPassword').focus();
-        return;
-      }
+      let payload;
+      try { payload = await provPayload(ssid, secret); }
+      catch (error) { $('provHint').textContent = error.message; if (error.focus && $(error.focus)) $(error.focus).focus(); return; }
       state.prov.busy = true;
       $('provHint').textContent = '';
       renderProv();
@@ -590,7 +693,7 @@
         // Claim unless this dashboard user already owns the board: a record without an owner
         // (paired over the LAN before ownership existed) is claimed so it gets one.
         const known = id ? state.devices.find(d => d.id === id && d.paired && d.ownerId != null) : null;
-        const payload = {ssid, pass: secret, claim: !known};
+        payload.claim = !known;
         if (state.publicUrl) payload.url = state.publicUrl;
         let denied = null;
         if (hello.locked && id) {
@@ -620,7 +723,7 @@
           return;
         }
         state.prov.joinUntil = Date.now() + PROV_JOIN_TIMEOUT_MS;
-        log(`Wi-Fi credentials for ${ssid} sent to the board over Bluetooth${payload.url ? ', with the build service address' : ''}.`, 'BLUETOOTH', 'success');
+        log(`Wi-Fi ${payload.auth && payload.auth !== 'personal' ? `enterprise (${payload.auth.toUpperCase()}) ` : ''}credentials for ${ssid} sent to the board over Bluetooth${payload.url ? ', with the build service address' : ''}.`, 'BLUETOOTH', 'success');
         $('provHint').textContent = state.publicUrl ? '' : 'The build service has no public address (ATECH_PUBLIC_URL), so this board cannot reach it for cloud deployments yet.';
         if (reply.token && id) {
           const response = await api('/api/devices/claim', {method: 'POST', headers: {'content-type': 'application/json'},
@@ -1163,9 +1266,7 @@
     function deployBlocker() {
       const job = state.job;
       if (!job || job.state !== 'ready') return 'Generate firmware first.';
-      const method = effectiveMethod();
       const identity = boardIdentity();
-      if (method === 'hotspot') return '';
       if (job.deviceId && identity && job.deviceId !== identity.id) return `This build is bound to ${job.deviceId}; the selected board is ${identity.id}.`;
       if (identity && job.demo !== identity.demo) return `This build is for Demo ${job.demo}; the board runs Demo ${identity.demo}.`;
       if (identity && identity.slotSize && job.firmware.size > identity.slotSize) return 'The image is larger than the board reports for its OTA slot.';
@@ -1175,7 +1276,7 @@
     function renderMethods() {
       const avail = availability();
       const effective = effectiveMethod();
-      for (const method of ['wifi', 'ble', 'hotspot']) {
+      for (const method of ['wifi', 'hotspot']) {
         const button = $(`method${method[0].toUpperCase()}${method.slice(1)}`);
         const note = $(`method${method[0].toUpperCase()}${method.slice(1)}Note`);
         button.classList.toggle('available', avail[method].ok);
@@ -1194,15 +1295,215 @@
       const blocker = deployBlocker();
       deploy.disabled = !canDeploy() || Boolean(blocker);
       deploy.title = blocker;
-      deploy.textContent = effective === 'hotspot' ? 'Download firmware for the hotspot portal' : `Deploy over ${methodLabel(effective)}`;
-      if (!state.busy && !state.deployment && state.job && state.job.state === 'ready') {
-        if (blocker) $('deployBadge').textContent = 'Blocked';
-        else $('deployBadge').textContent = `Ready: ${methodLabel(effective)}`;
+      deploy.textContent = effective === 'hotspot' ? 'Start the local Wi-Fi update' : `Deploy over ${methodLabel(effective)}`;
+      if (!state.busy && !state.deployment && !state.local && state.job && state.job.state === 'ready') {
+        const offline = effective === 'hotspot' && offlineCloudBoard();
+        $('deployBadge').textContent = blocker ? 'Blocked' : offline ? OFFLINE_BADGE : `Ready: ${methodLabel(effective)}`;
         $('deployBadge').className = `badge ${blocker ? 'error' : 'neutral'}`;
         if (!state.lastFailure) $('deployStatus').textContent = blocker || (effective === 'hotspot'
-          ? 'No Wi-Fi or Bluetooth path is available. Download the firmware and follow How to connect a new board in step 1.'
+          ? (offline ? 'The board cannot be reached through the cloud right now. Start the local Wi-Fi update: the signed package is prepared while this computer is still online, then you join the board\'s hotspot and upload it there.'
+                     : 'No board is reachable over Wi-Fi. The local Wi-Fi update prepares the signed package here; you then upload it on the board\'s own page.')
           : `Ready to deploy over ${methodLabel(effective)}.`);
       }
+      renderLocal();
+    }
+
+    // ---------------------------------------------------------------- local Wi-Fi update
+    function renderLocal() {
+      const local = state.local;
+      $('localPanel').hidden = !local;
+      if (!local) return;
+      const unknown = 'printed on the board\'s serial console at boot';
+      $('localSsid').textContent = local.ssid || unknown;
+      $('localPass').textContent = local.pass || unknown;
+      $('localToken').textContent = local.token || unknown;
+      $('localHost').textContent = local.hostname ? `(or the name ${local.hostname}.local)` : '';
+      $('localPrepare').disabled = local.phase === 'credentials' || local.phase === 'preparing' || local.phase === 'done';
+      $('localPrepare').textContent = local.phase === 'waiting' ? 'Prepare again' : local.phase === 'preparing' ? 'Preparing' : 'Prepare update';
+      $('localFile').hidden = !local.fileUrl;
+    }
+
+    function packageName(job) { return `atech-demo${demo}-${job.buildId}.atech`; }
+
+    // Reads the package header the board's page reads too: magic, little-endian header length, JSON.
+    function readPackageHeader(bytes) {
+      const magic = PACKAGE_MAGIC;
+      if (bytes.length < magic.length + 4) throw new Error('the download is not an Atech update package');
+      for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic.charCodeAt(i)) throw new Error('the download is not an Atech update package');
+      const length = (bytes[magic.length] | (bytes[magic.length + 1] << 8) | (bytes[magic.length + 2] << 16) | (bytes[magic.length + 3] << 24)) >>> 0;
+      const start = magic.length + 4;
+      if (length === 0 || length > PACKAGE_MAX_HEADER || start + length > bytes.length) throw new Error('the package header is damaged');
+      let header;
+      try { header = JSON.parse(new win.TextDecoder().decode(bytes.subarray(start, start + length))); }
+      catch (_) { throw new Error('the package header is not readable'); }
+      if (!header || typeof header !== 'object') throw new Error('the package header is not readable');
+      if (bytes.length - start - length !== Number(header.size)) throw new Error('the package size does not match its header');
+      return header;
+    }
+
+    function stopLocalWatch() {
+      if (state.localWatchTimer) { clearInterval(state.localWatchTimer); state.localWatchTimer = null; }
+    }
+
+    function clearLocal() {
+      stopLocalWatch();
+      if (state.local && state.local.blobUrl && win.URL && typeof win.URL.revokeObjectURL === 'function') {
+        try { win.URL.revokeObjectURL(state.local.blobUrl); } catch (_) { /* ignore */ }
+      }
+      state.local = null;
+    }
+
+    // Opens the local update: the board's hotspot credentials (owner only) and the steps. Nothing is
+    // downloaded until the user clicks Prepare.
+    async function startLocalUpdate(job, device) {
+      clearLocal();
+      state.lastFailure = null;
+      state.lastVerified = false;
+      state.deployment = null;
+      const name = device ? device.name || device.id : 'the board';
+      const hostname = device ? ((device.identity && device.identity.wifi && device.identity.wifi.hostname) || `atech-${String(device.suffix || device.id.slice(-6)).toLowerCase()}`) : '';
+      state.local = {jobId: job.id, phase: 'credentials', ssid: hotspotSsid(device), pass: '', token: '', hostname, fileName: packageName(job),
+                     fileUrl: null, blobUrl: null, offline: offlineCloudBoard()};
+      setDeployTone('working');
+      renderPhases(null);
+      renderChecks([]);
+      $('deployTime').textContent = '';
+      setDeployStatus(`Local Wi-Fi update for ${name}: prepare the package below while this computer is online, then join the board's hotspot.`,
+                      'neutral', state.local.offline ? OFFLINE_BADGE : 'Local Wi-Fi update');
+      $('localState').textContent = 'Click Prepare update. The signed package is checked here and saved to this computer before you leave your network.';
+      $('localDone').textContent = '';
+      $('localHint').textContent = device && device.paired ? 'Fetching the hotspot details for the board\'s owner.' : '';
+      refresh();
+      if (device && device.paired) {
+        try {
+          const response = await api(`/api/devices/${device.id}/local-credentials`);
+          const body = await response.json();
+          if (!state.local || state.local.jobId !== job.id) return;
+          if (response.ok) {
+            Object.assign(state.local, {ssid: body.ssid, pass: body.pass, token: body.token, hostname: body.hostname || hostname});
+            $('localHint').textContent = 'The hotspot password and the authorization code are shown to the board\'s owner only; the board also prints them on its serial console at boot. If the hotspot is not visible, hold the BOOT button for about 3 seconds (release before 10) to start it by hand.';
+          } else {
+            $('localHint').textContent = `${body.error || `The backend could not provide the hotspot details (HTTP ${response.status})`} They are printed on the board's serial console at boot.`;
+          }
+        } catch (error) {
+          if (!state.local || state.local.jobId !== job.id) return;
+          $('localHint').textContent = `Could not fetch the hotspot details: ${error.message}. They are printed on the board's serial console at boot.`;
+        }
+      } else {
+        $('localHint').textContent = 'No claimed board is selected: the hotspot name, its password and the authorization code are printed on the board\'s serial console at boot. If the hotspot is not visible, hold the BOOT button for about 3 seconds (release before 10) to start it by hand.';
+      }
+      state.local.phase = 'prepare';
+      refresh();
+    }
+
+    // Fetches the signed package, checks it is the right build, saves it, then watches for the board.
+    async function prepareLocal() {
+      const local = state.local;
+      const job = state.job;
+      if (!local || !job || job.id !== local.jobId || job.state !== 'ready' || local.phase === 'preparing') return;
+      const device = selectedDevice();
+      stopLocalWatch();
+      local.phase = 'preparing';
+      renderLocal();
+      $('localState').textContent = 'Fetching and checking the signed package.';
+      const params = new win.URLSearchParams();
+      if (device) params.set('deviceId', device.id);
+      if (downgradeAllowed(job)) params.set('downgrade', '1');
+      const query = params.toString() ? `?${params.toString()}` : '';
+      try {
+        const response = await api(`/api/builds/${job.id}/package${query}`);
+        if (!response.ok) {
+          let detail = `HTTP ${response.status}`;
+          try { detail = (await response.json()).error || detail; } catch (_) { /* keep the status */ }
+          throw new Error(detail);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const header = readPackageHeader(bytes);
+        if (header.build !== job.buildId) throw new Error(`the package carries build ${header.build}, this job is ${job.buildId}`);
+        if (Number(header.demo) !== demo) throw new Error(`the package is for Demo ${header.demo}`);
+        if (!header.sig) throw new Error('the package is not signed');
+        const link = $('localFile');
+        if (win.URL && typeof win.URL.createObjectURL === 'function') {
+          if (local.blobUrl) { try { win.URL.revokeObjectURL(local.blobUrl); } catch (_) { /* ignore */ } }
+          local.blobUrl = win.URL.createObjectURL(new win.Blob([bytes], {type: 'application/octet-stream'}));
+          local.fileUrl = local.blobUrl;
+          link.href = local.fileUrl;
+          link.download = local.fileName;
+          link.click();
+        } else {
+          local.fileUrl = apiUrl(`/api/builds/${job.id}/package${query}${key ? `${query ? '&' : '?'}key=${encodeURIComponent(key)}` : ''}`);
+          link.href = local.fileUrl;
+          link.download = local.fileName;
+        }
+        local.phase = 'waiting';
+        $('localState').textContent = `Package ${local.fileName} (${formatBytes(bytes.length)}) is saved and verified: it carries build ${job.buildId} and the signature the board checks before installing anything. ` +
+          `Now join the hotspot ${local.ssid || 'ATECH-<suffix>'}, open the board's page and upload that file. This page watches for the board to come back with the new build.`;
+        setDeployStatus(`Waiting for ${device ? device.name || device.id : 'the board'} to report build ${job.buildId}. Upload the package on the board's page: it checks the signature, installs to its spare slot, restarts and rejoins your Wi-Fi.`,
+                        'working', 'Waiting for the board');
+        log(`Local update package ${local.fileName} prepared (${formatBytes(bytes.length)}).`, 'BUILDER');
+        startLocalWatch(job);
+      } catch (error) {
+        local.phase = 'prepare';
+        $('localState').textContent = `The package could not be prepared: ${error.message}. Nothing was sent to the board.`;
+        setDeployStatus(`Local Wi-Fi update not prepared: ${error.message}.`, 'error', 'Not prepared');
+        log(`Local update package failed: ${error.message}`, 'BUILDER', 'error');
+      }
+      refresh();
+    }
+
+    function startLocalWatch(job) {
+      stopLocalWatch();
+      state.localWatchUntil = Date.now() + LOCAL_WATCH_MAX_MS;
+      state.localWatchTimer = setInterval(async () => {
+        if (!state.local || state.local.jobId !== job.id || state.local.phase !== 'waiting') { stopLocalWatch(); return; }
+        if (Date.now() > state.localWatchUntil) {
+          stopLocalWatch();
+          setDeployStatus(`Still no report of build ${job.buildId} after 30 minutes. If the upload is done, give the board a minute to rejoin your Wi-Fi; click Prepare again to keep watching.`, 'neutral', 'Not confirmed');
+          return;
+        }
+        await refreshDevices({probe: true}).catch(() => {});
+        const device = selectedDevice();
+        if (!device) return;
+        const build = (device.identity && device.identity.build) || (device.cloud && device.cloud.lastReport && device.cloud.lastReport.build) || null;
+        if (build === job.buildId) completeLocal(job, device);
+      }, Math.max(pollMs, 1000));
+    }
+
+    function completeLocal(job, device) {
+      stopLocalWatch();
+      state.local.phase = 'done';
+      state.lastVerified = true;
+      const identity = device.identity || {};
+      const name = device.name || device.id;
+      $('localDone').textContent = `${name} is back and running build ${job.buildId}${identity.app ? ` (app "${identity.app}" v${identity.ver})` : ''}.`;
+      setDeployTone('success');
+      renderChecks([`${device.id} reported build ${job.buildId}`,
+                    identity.pending ? 'the board confirms the new firmware itself once its health check passes' : 'boot confirmed by the board']);
+      setDeployStatus(`Update complete: ${name} runs build ${job.buildId}.`, 'success', 'Update complete');
+      log(`Local update verified: ${device.id} reports build ${job.buildId}.`, 'BUILDER', 'success');
+      recordDeployment(job, 'verified', `local Wi-Fi update; the board reported build ${job.buildId}`, 'hotspot');
+      refresh();
+    }
+
+    // A build whose version is below what the board has run is a downgrade; the board refuses it
+    // unless the dashboard says so, and the dashboard says so only after the user confirms.
+    function downgradeOf(job) {
+      const identity = boardIdentity();
+      const device = selectedDevice();
+      const reported = device && device.cloud && device.cloud.lastReport ? Number(device.cloud.lastReport.maxVersion || 0) : 0;
+      const boardVersion = Math.max(identity ? Number(identity.ver || 0) : 0, identity ? Number(identity.maxVersion || 0) : 0, reported);
+      if (!boardVersion || !(Number(job.appVersion) < boardVersion)) return null;
+      return {boardVersion};
+    }
+
+    function armDowngrade(job) {
+      state.downgradeConfirmed = {jobId: job.id, deviceId: (selectedDevice() || {}).id || '', at: Date.now()};
+    }
+
+    function downgradeAllowed(job) {
+      const c = state.downgradeConfirmed;
+      const device = selectedDevice();
+      return Boolean(c && c.jobId === job.id && c.deviceId === ((device && device.id) || '') && Date.now() - c.at < DOWNGRADE_ARM_MS);
     }
 
     function setDeployStatus(text, tone = 'neutral', badge) {
@@ -1389,7 +1690,7 @@
       });
     }
 
-    async function deployWifi(job, device) {
+    async function deployWifi(job, device, {allowDowngrade = false} = {}) {
       const cloud = reach(device) === 'cloud';
       state.deployingVia = 'wifi';
       state.deployTransport = cloud ? 'cloud' : 'lan';
@@ -1403,7 +1704,7 @@
                             : `Sending the firmware to ${device.name || device.id} over Wi-Fi.`, 'working', cloud ? 'Queued' : 'Starting');
       // A board reached through the cloud is asked for explicitly: the backend never tries the LAN for it.
       const response = await api(`/api/builds/${job.id}/deploy`, {method: 'POST', headers: {'content-type': 'application/json'},
-                                                                   body: JSON.stringify(cloud ? {deviceId: device.id, via: 'cloud'} : {deviceId: device.id})});
+                                                                   body: JSON.stringify({deviceId: device.id, ...(cloud ? {via: 'cloud'} : {}), ...(allowDowngrade ? {allowDowngrade: true} : {})})});
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
       log(`${cloud ? 'Cloud' : 'Wi-Fi'} deployment ${body.id} ${cloud ? 'queued' : 'started'} for ${device.id}.`, 'BACKEND');
@@ -1425,87 +1726,6 @@
       return result;
     }
 
-    async function waitForLoops(baseline) {
-      const deadline = Date.now() + LOOP_WAIT_MS;
-      let latest = null;
-      while (Date.now() < deadline) {
-        latest = await transport.readIdentity();
-        if (latest.loops > baseline) return latest;
-        await delay(1000);
-      }
-      return latest;
-    }
-
-    async function verifyAfterReboot(job, expectedDeviceId, identity) {
-      const checks = [];
-      if (identity.id !== expectedDeviceId) {
-        throw new Error(`Reconnected to ${identity.id}, not the board that was updated (${expectedDeviceId})`);
-      }
-      checks.push(`device ${identity.id} matched`);
-      if (identity.build !== job.buildId) {
-        throw new Error(`Board reports build ${identity.build}, expected ${job.buildId}. The new image is not running.`);
-      }
-      checks.push(`build ${job.buildId} running (app "${identity.app}" v${identity.ver})`);
-      if (identity.safe) throw new Error('Board booted into safe mode; the generated app is disabled.');
-      const live = await waitForLoops(identity.loops);
-      if (!live || live.loops <= identity.loops) {
-        throw new Error(`The generated app did not execute (state ${live ? live.appState : 'unknown'}). ` +
-                        'The image stays pending; a reset rolls back to the previous firmware.');
-      }
-      checks.push(`app loop ran ${live.loops - identity.loops} times in the verification window`);
-      const echo = await transport.control(protocol.CONTROL.echo);
-      if (echo.status !== 0) throw new Error(`Echo failed: ${echo.statusText}`);
-      checks.push('echo answered');
-      const confirm = await transport.control(protocol.CONTROL.confirm);
-      if (confirm.status !== 0) throw new Error(`Confirm failed: ${confirm.statusText}`);
-      checks.push(live.pending ? 'boot confirmed, rollback cancelled' : 'boot already confirmed by the core');
-      const final = await transport.readIdentity();
-      return {checks, identity: final};
-    }
-
-    async function deployBle(job) {
-      state.deployingVia = 'ble';
-      renderMethods();
-      const before = transport.identity();
-      setDeployTone('working');
-      renderPhases('uploading');
-      renderChecks([]);
-      renderTransfer({bytes: 0, total: job.firmware.size, speedBps: 0, etaMs: null});
-      $('deployTime').textContent = '';
-      setDeployStatus('Fetching the firmware from the backend.', 'working', 'Starting');
-      const response = await api(`/api/builds/${job.id}/firmware.bin`);
-      if (!response.ok) throw new Error(`Firmware download failed (HTTP ${response.status})`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.length !== job.firmware.size) throw new Error('Downloaded image size does not match the build record');
-      log(`Deploying ${job.appName} (${formatBytes(bytes.length)}) to ${before.id} over ${transport.name || 'BLE'}.`, 'BUILDER');
-      setDeployStatus('Sending the firmware over Bluetooth. Keep this tab in the foreground.', 'working', 'Transferring');
-      const startedAt = Date.now();
-      let transferMs = null;
-      const {identity: rebooted} = await transport.deploy(bytes, {
-        buildId: job.buildId, appName: job.appName, appVersion: job.appVersion, size: job.firmware.size, crc32: job.firmware.crc32,
-        onProgress: ({bytes: sent, total}) => {
-          const elapsed = Math.max(1, Date.now() - startedAt);
-          const speed = sent * 1000 / elapsed;
-          renderTransfer({bytes: sent, total, speedBps: speed, etaMs: speed > 0 ? (total - sent) / speed * 1000 : null});
-        },
-        onPhase: phase => {
-          if (phase === 'validating') { transferMs = Date.now() - startedAt; $('deployTime').textContent = `${formatDuration(transferMs)} transfer`; renderPhases('finishing'); setDeployStatus('Board is checking the image.', 'working', 'Image check'); }
-          if (phase === 'rebooting') { renderPhases('rebooting'); setDeployStatus('Board is restarting.', 'working', 'Rebooting'); }
-          if (phase === 'verifying') { renderPhases('verifying'); setDeployStatus('Reconnecting over Bluetooth and checking the new firmware.', 'working', 'Verifying'); }
-        },
-      });
-      renderPhases('verifying');
-      setDeployStatus('Board is back. Checking that the new firmware is running.', 'working', 'Verifying');
-      const {checks, identity} = await verifyAfterReboot(job, before.id, rebooted);
-      renderPhases('verified');
-      renderChecks(checks);
-      setDeployTone('success');
-      setDeployStatus(`Deployed and verified on ${identity.id}.`, 'success', 'Verified');
-      log(`Bluetooth deployment verified: ${checks.join('; ')}.`, 'BUILDER', 'success');
-      await recordDeployment(job, 'verified', checks.join('; '), 'ble');
-      return {checks, identity};
-    }
-
     async function recordDeployment(job, result, detail, transportName) {
       try {
         await api(`/api/builds/${job.id}/deployed`, {
@@ -1521,21 +1741,28 @@
       if (blocker) { setDeployStatus(blocker, 'error', 'Blocked'); return; }
       const job = state.job;
       const method = effectiveMethod();
-      if (method === 'hotspot') {
-        $('aiDownload').click();
-        $('wifiTransportPanel').hidden = false;
-        $('wifiTransportPanel').open = true;
-        setDeployStatus('Firmware downloaded. Follow How to connect a new board in step 1 to upload it on the board\'s own page.', 'neutral', 'Manual');
+      const device = selectedDevice();
+      const downgrade = downgradeOf(job);
+      const allowDowngrade = downgradeAllowed(job);
+      if (downgrade && !allowDowngrade) {
+        armDowngrade(job);
+        setDeployStatus(`This build is version ${job.appVersion} and the board has run version ${downgrade.boardVersion}. Deploying an older version is a downgrade, which the board refuses unless you allow it here. Click Deploy again to allow it for this build (the confirmation lasts a minute).`,
+                        'neutral', 'Confirm downgrade');
+        log(`Downgrade from version ${downgrade.boardVersion} to ${job.appVersion} needs confirmation.`, 'BUILDER', 'warn');
         return;
       }
+      if (method === 'hotspot') {
+        await startLocalUpdate(job, device);
+        return;
+      }
+      clearLocal();
       state.busy = true;
       state.lastFailure = null;
       state.lastVerified = false;
       state.deployment = null;
       refresh();
       try {
-        if (method === 'wifi') await deployWifi(job, selectedDevice());
-        else await deployBle(job);
+        await deployWifi(job, device, {allowDowngrade});
         state.lastVerified = true;
         await refreshDevices({probe: true}).catch(() => {});
       } catch (error) {
@@ -1543,12 +1770,14 @@
         setDeployTone('error');
         const label = methodLabel(method);
         const cloudJob = error.deployment && error.deployment.transport === 'cloud';
-        const other = method === 'wifi' ? bleAvailability() : method === 'ble' ? wifiAvailability() : {ok: false};
-        const hint = other.ok ? ` ${methodLabel(method === 'wifi' ? 'ble' : 'wifi')} is available: choose it above and click Deploy again.`
-                              : ' The previous firmware keeps running; fix the cause and click Deploy again.';
+        let hint = ' The previous firmware keeps running. A local Wi-Fi update is available: choose it above and click Deploy again, or fix the cause and retry.';
+        if (/Downgrade refused/.test(error.message)) {
+          // The board knows its history better than the dashboard: arm the same confirmation.
+          armDowngrade(job);
+          hint = ' The board has run a higher app version than this build. Click Deploy again to allow the downgrade for this build (the confirmation lasts a minute).';
+        }
         setDeployStatus(`${label} deployment not verified: ${error.message}.${hint}`, 'error', cloudJob ? CLOUD_BADGES[error.deployment.state] || 'Failed' : 'Not verified');
         log(`${label} deployment failed: ${error.message}`, 'BUILDER', 'error');
-        if (method === 'ble') await recordDeployment(job, 'failed', error.message, 'ble');
       } finally {
         state.busy = false;
         state.deployingVia = null;
@@ -1700,10 +1929,12 @@
       if (!prompt) { setStatus('Describe what the board should do first.', 'error', 'Needs prompt'); return; }
       const identity = boardIdentity();
       stopFollowing();
+      clearLocal();
       state.job = null;
       state.lastFailure = null;
       state.lastVerified = false;
       state.deployment = null;
+      state.downgradeConfirmed = null;
       $('aiReview').hidden = true;
       $('aiDownload').hidden = true;
       $('aiLog').hidden = true;
@@ -1813,26 +2044,31 @@
     $('provJoin').addEventListener('click', () => { joinWifi(); });
     $('provForget').addEventListener('click', () => { forgetWifi(); });
     $('provPassword').addEventListener('keydown', event => { if (event.key === 'Enter') joinWifi(); });
+    $('provSsid').addEventListener('input', () => { detectProvAuth(); });
+    $('provSsid').addEventListener('change', () => { detectProvAuth(); });
+    $('provAuth').addEventListener('change', () => { renderProvForm(); });
     $('syncToggle').addEventListener('click', () => { toggleDemoState(); });
     $('syncConnect').addEventListener('click', () => { connectAnotherBoard(); });
     $('syncPair').addEventListener('click', () => { pairWithCode(); });
     $('syncUnpair').addEventListener('click', () => { unpairBoard(); });
     $('syncPairInput').addEventListener('input', () => { renderSync(); });
     $('syncPairInput').addEventListener('keydown', event => { if (event.key === 'Enter') pairWithCode(); });
-    for (const method of ['wifi', 'ble', 'hotspot']) {
+    for (const method of ['wifi', 'hotspot']) {
       $(`method${method[0].toUpperCase()}${method.slice(1)}`).addEventListener('click', () => {
         if (state.busy) return;
         state.method = state.method === method ? null : method;
         state.lastFailure = null;
+        if (state.local && state.local.phase !== 'waiting') clearLocal();
         refresh();
       });
     }
+    $('localPrepare').addEventListener('click', () => { prepareLocal(); });
     $('aiPrompt').addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); build(); }
     });
     $('aiBrowserNote').textContent = hosted
-      ? 'This browser has no Web Bluetooth. Claim your board in step 1 and deploy through the cloud, or download the firmware for the board\'s hotspot page.'
-      : 'This browser has no Web Bluetooth, so the Bluetooth backup is unavailable here. Wi-Fi deployment works in Safari and Chrome once the board is on your Wi-Fi and paired. Otherwise download the firmware and use the hotspot steps, where pairing and upload are manual.';
+      ? 'This browser has no Web Bluetooth, so the one-time Wi-Fi setup needs Chrome or Edge, or the board\'s own hotspot page. Claim your board in step 1 and deploy through the cloud, or run the local Wi-Fi update from the board\'s own page.'
+      : 'This browser has no Web Bluetooth, so the one-time Wi-Fi setup needs Chrome or Edge, or the board\'s own hotspot page. Wi-Fi deployment works in Safari and Chrome once the board is on your Wi-Fi and paired; the local Wi-Fi update works from any browser through the board\'s own page.';
     renderExamples();
     setStatus('', 'neutral', 'Idle');
     setProgress(0);

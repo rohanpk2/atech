@@ -185,3 +185,49 @@ test('LAN pairing records the owner', async () => {
   assert.deepEqual(devices.list('carol').map(d => d.id), [BOARD]);
   assert.deepEqual(devices.list('dave'), []);
 });
+
+test('login stores the hotspot credentials; the listing shows the name only, the password stays for local-credentials', async () => {
+  const {devices, cloud, login} = boot();
+  await cloud.claim({id: BOARD, token: SECRET, name: 'Desk', ownerId: 'alice'});
+  await login(BOARD, SECRET, {ap_ssid: 'ATECH-D4E5F6', ap_pass: 'hotspot-secret-123'});
+  assert.deepEqual(devices.describe(BOARD).hotspot, {ssid: 'ATECH-D4E5F6'}, 'the listing never carries the password');
+  assert.equal(devices.get(BOARD).hotspot.pass, 'hotspot-secret-123', 'the record keeps it for the owner-only route');
+  assert.equal(devices.describe(BOARD).cloud.lastReport.apPass, undefined, 'the password is not copied into the report');
+  cloud.touch(BOARD, info());
+  assert.deepEqual(devices.describe(BOARD).hotspot, {ssid: 'ATECH-D4E5F6'}, 'a poll without the fields keeps them');
+  await login(BOARD, SECRET, {ap_ssid: 'ATECH-D4E5F6', ap_pass: 'rotated-secret-456'});
+  assert.equal(devices.get(BOARD).hotspot.pass, 'rotated-secret-456', 'a new login refreshes them');
+  await login(BOARD, SECRET, {ap_ssid: 'short', ap_pass: 'x'});
+  assert.equal(devices.get(BOARD).hotspot.pass, 'rotated-secret-456', 'malformed values are ignored');
+  assert.equal(devices.list('bob').length, 0, 'other users never see the record');
+  assert.equal(devices.describe(BOARD).secret, undefined);
+});
+
+test('captive state reaches the cloud report and the device description', async () => {
+  const {devices, cloud, login} = boot();
+  await cloud.claim({id: BOARD, token: SECRET, name: 'Desk', ownerId: 'alice'});
+  await login(BOARD, SECRET, {internet: 'captive', captive_url: 'http://portal.campus.edu/login', transport: 'hotspot', hotspot: '1',
+                              mac: 'A1:B2:C3:D4:E5:F6', wifi_auth: 'peap', kid: 'abcd1234', max_ver: '3'});
+  const described = devices.describe(BOARD);
+  const report = described.cloud.lastReport;
+  assert.equal(report.internet, 'captive');
+  assert.equal(report.captiveUrl, 'http://portal.campus.edu/login');
+  assert.equal(report.transport, 'hotspot');
+  assert.equal(report.hotspotActive, true);
+  assert.equal(report.mac, 'A1:B2:C3:D4:E5:F6');
+  assert.equal(report.wifiAuth, 'peap');
+  assert.equal(report.kid, 'abcd1234');
+  assert.equal(report.maxVersion, 3);
+  assert.equal(described.identity.wifi.internet, 'captive', 'the LAN-shaped identity carries the network state');
+  assert.equal(described.identity.wifi.captiveUrl, 'http://portal.campus.edu/login');
+  assert.equal(described.identity.wifi.transport, 'hotspot');
+  assert.equal(described.identity.wifi.hotspot, true);
+  assert.equal(described.identity.wifi.mac, 'A1:B2:C3:D4:E5:F6');
+  assert.equal(described.identity.wifi.auth, 'peap');
+  assert.equal(described.identity.kid, 'abcd1234');
+  cloud.touch(BOARD, info({internet: 'ok', transport: 'cloud', hotspot: '0'}));
+  assert.equal(devices.describe(BOARD).identity.wifi.internet, 'ok');
+  assert.equal(devices.describe(BOARD).identity.wifi.transport, 'cloud');
+  cloud.touch(BOARD, info());
+  assert.equal(devices.describe(BOARD).identity.wifi.internet, 'unknown', 'an old firmware without the field reads unknown');
+});

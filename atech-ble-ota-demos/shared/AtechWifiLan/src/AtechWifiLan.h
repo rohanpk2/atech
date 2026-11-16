@@ -6,6 +6,28 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 
+// Wi-Fi security methods of the stored profile.
+enum : uint8_t { ATECH_WIFI_PERSONAL = 0, ATECH_WIFI_PEAP = 1, ATECH_WIFI_TTLS = 2, ATECH_WIFI_TLS = 3 };
+// TTLS phase 2 methods, in the esp_eap_ttls_phase2_types order.
+enum : uint8_t { ATECH_TTLS_EAP = 0, ATECH_TTLS_MSCHAPV2 = 1, ATECH_TTLS_MSCHAP = 2, ATECH_TTLS_PAP = 3, ATECH_TTLS_CHAP = 4 };
+
+// The one Wi-Fi network the board joins: personal (passphrase) or enterprise (PEAP, EAP-TTLS,
+// EAP-TLS). An enterprise profile always validates the authentication server's certificate, with
+// the given CA or the built-in bundle; there is no way to turn that off.
+struct AtechWifiProfile {
+  String ssid;
+  String pass;              // personal passphrase, or the PEAP/TTLS account password
+  uint8_t auth = ATECH_WIFI_PERSONAL;
+  String identity;          // anonymous (outer) identity; the EAP-TLS identity
+  String username;          // PEAP and TTLS
+  String ca;                // PEM CA certificate(s); empty when caBundle
+  String cert;              // PEM client certificate (EAP-TLS)
+  String key;               // PEM private key (EAP-TLS)
+  String domain;            // expected server name, optional
+  uint8_t phase2 = ATECH_TTLS_MSCHAPV2;
+  bool caBundle = false;    // validate the server against the built-in Mozilla bundle
+};
+
 struct AtechWifiLanConfig {
   uint8_t demo;                       // 1 or 2
   const char *imageIdentity;          // marker every valid image for this demo carries
@@ -23,6 +45,8 @@ struct AtechWifiLanConfig {
   bool (*otherOtaBusy)();
   // Optional: a JSON object appended to /api/identity as "cloud" (the cloud OTA agent's status).
   String (*extraIdentity)();
+  // Optional: a JSON object appended to /api/identity as "transport" (the hotspot controller's state).
+  String (*transportIdentity)();
   // Optional: board-to-board sync. POST /api/sync (HMAC "atech-sync/1" with the pairing token)
   // hands the form body to syncCommand and answers its JSON; syncIdentity is appended to
   // /api/identity as "sync".
@@ -42,11 +66,20 @@ public:
   // Services reconnects, session timeouts and the post-update restart.
   void loop();
 
-  // Credentials (used by the hotspot provisioning page).
+  // The stored profile (hotspot page and Bluetooth setup). saveCredentials is the personal-network
+  // shortcut; saveProfile validates, stores and connects any method. lastError() explains a false.
   bool hasCredentials() const;
   bool saveCredentials(const String &ssid, const String &password);
+  bool saveProfile(const AtechWifiProfile &profile);
   bool forgetCredentials();
+  AtechWifiProfile profile() const;   // a copy with the secrets (pass, key) blank
   String configuredSsid() const;
+  uint8_t authMethod() const;
+  const char *authName() const;       // personal|peap|ttls|tls
+  static const char *authName(uint8_t auth);
+  static bool parseAuth(const String &text, uint8_t &auth);
+  static const char *phase2Name(uint8_t phase2);
+  static bool parsePhase2(const String &text, uint8_t &phase2);
   int lastDisconnectReason() const;   // wifi_err_reason_t of the last station disconnect, 0 when none
 
   // Station state.
@@ -55,7 +88,16 @@ public:
   IPAddress ip() const;
   int rssi() const;
   String hostname() const;
+  String stationMac() const;       // the station interface MAC (for IT device registration)
+  // Internet reachability after association: "unknown", "checking", "ok", "captive" (a sign-in page
+  // intercepts HTTP) or "offline". Probed on a small task after every connect and on request.
+  const char *internetState() const;
+  String captiveUrl() const;       // the sign-in page the probe was redirected to, if any
+  void recheckInternet();
   uint16_t port() const;
+  // Starts the mDNS responder for atech-<suffix>.local if it is not running yet (the hotspot uses it
+  // so the board is reachable by name on its own network as well).
+  bool ensureMdns();
   String statusJson() const;       // for the portal and the identity endpoint
   String scanJson();
   // The same scan as compact text lines "ssid<TAB>rssi<TAB>open" (strongest first, one per SSID)
